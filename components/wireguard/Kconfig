@@ -1,0 +1,123 @@
+menu "WireGuard VPN"
+
+    config WIREGUARD_ENABLE
+        bool "Enable WireGuard VPN"
+        default y
+        help
+            Enable WireGuard VPN support. The device will bring up a
+            WireGuard tunnel after WiFi connects.
+
+    config WIREGUARD_LOCAL_IP
+        string "Local WireGuard IP address"
+        depends on WIREGUARD_ENABLE
+        default "10.0.0.2"
+        help
+            IPv4 address assigned to the WireGuard interface (e.g. "10.0.0.2").
+            Can be overridden at runtime via NVS key "local_ip" in namespace "wireguard".
+
+    config WIREGUARD_LOCAL_NETMASK
+        string "Local WireGuard netmask"
+        depends on WIREGUARD_ENABLE
+        default "255.255.255.0"
+        help
+            Netmask for the WireGuard interface.
+            Can be overridden at runtime via NVS key "local_netmask".
+
+    config WIREGUARD_PRIVATE_KEY
+        string "Private key (base64)"
+        depends on WIREGUARD_ENABLE
+        default ""
+        help
+            Base64-encoded 32-byte WireGuard private key for this device.
+            Generate with: wg genkey
+            Can be overridden at runtime via NVS key "private_key".
+
+    config WIREGUARD_PEER_PUBLIC_KEY
+        string "Peer public key (base64)"
+        depends on WIREGUARD_ENABLE
+        default ""
+        help
+            Base64-encoded 32-byte public key of the WireGuard peer.
+            Can be overridden at runtime via NVS key "peer_pub_key".
+
+    config WIREGUARD_PEER_ENDPOINT
+        string "Peer endpoint hostname or IP"
+        depends on WIREGUARD_ENABLE
+        default ""
+        help
+            Hostname or IP address of the WireGuard server/peer.
+            Can be overridden at runtime via NVS key "peer_endpoint".
+
+    config WIREGUARD_PEER_PORT
+        int "Peer endpoint port"
+        depends on WIREGUARD_ENABLE
+        range 1 65535
+        default 51820
+        help
+            UDP port of the WireGuard peer.
+            Can be overridden at runtime via NVS key "peer_port" (u16).
+
+    config WIREGUARD_LISTEN_PORT
+        int "Local listen port"
+        depends on WIREGUARD_ENABLE
+        range 0 65535
+        default 51820
+        help
+            Local UDP port WireGuard listens on. 0 = ephemeral.
+            Can be overridden at runtime via NVS key "listen_port" (u16).
+
+    config WIREGUARD_KEEPALIVE
+        int "Persistent keepalive interval (seconds, 0=disabled)"
+        depends on WIREGUARD_ENABLE
+        range 0 65535
+        default 25
+        help
+            Persistent keepalive interval in seconds. 0 = disabled.
+            Can be overridden at runtime via NVS key "keepalive" (u16).
+
+    config WIREGUARD_SET_AS_DEFAULT_ROUTE
+        bool "Set WireGuard interface as default route"
+        depends on WIREGUARD_ENABLE
+        default n
+        help
+            If enabled, all unrouted traffic is sent through WireGuard (full tunnel).
+            For this serial bridge use case, leave DISABLED so TCP server traffic
+            (ports 8888, 8889, 2217) stays on the local WiFi interface and the device
+            remains reachable on the LAN. Enable only for full-tunnel deployments.
+            Can be overridden at runtime via NVS key "set_default" (u8, 0/1).
+
+    config WIREGUARD_NTP_SERVER
+        string "NTP server hostname"
+        depends on WIREGUARD_ENABLE
+        default "ntp1.mfeed.ad.jp"
+        help
+            NTP server used to synchronize the system clock before starting the
+            WireGuard tunnel. Accurate time is required for WireGuard's TAI64N
+            timestamp; without it the remote peer will reject handshakes after
+            a device reset.
+            mfeed (ntp1/ntp2/ntp3.mfeed.ad.jp) is the default public NTP service
+            widely used in Japan.
+            Can be overridden at runtime via NVS key "ntp_server" in namespace "wireguard".
+
+    config WIREGUARD_NTP_TIMEOUT_MS
+        int "NTP sync timeout (ms)"
+        depends on WIREGUARD_ENABLE
+        range 1000 60000
+        default 10000
+        help
+            Maximum time to wait for NTP synchronization before starting WireGuard.
+            If the timeout expires without sync, WireGuard starts anyway with the
+            current (potentially incorrect) system time and logs a warning.
+
+    config WIREGUARD_MAX_PEERS
+        int "Maximum number of WireGuard peers"
+        depends on WIREGUARD_ENABLE
+        range 1 16
+        default 1
+        help
+            Maximum number of WireGuard peers that can be active simultaneously.
+            Each peer consumes approximately 800 bytes of SRAM.
+            Set to 1 for normal single-peer WireGuard use.
+            Increase (e.g. to 8) when using managed mode with Tailscale.
+
+endmenu

@@ -1,0 +1,12 @@
+build/
+build-*/
+sdkconfig
+sdkconfig.old
+sdkconfig.local
+Makefile.local
+managed_components/
+dependencies.lock
+*.swp
+.cache/
+.vscode/
+compile_commands.json

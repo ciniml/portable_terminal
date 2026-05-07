@@ -1,0 +1,64 @@
+menu "Tailscale"
+
+    config TAILSCALE_ENABLE
+        bool "Enable Tailscale client"
+        default n
+        select WIREGUARD_ENABLE
+        help
+            Enable the Tailscale client.  The device will join the Tailscale
+            network after WiFi connects, using the WireGuard data plane.
+
+    config TAILSCALE_AUTH_KEY
+        string "Pre-auth key (tskey-auth-...)"
+        depends on TAILSCALE_ENABLE
+        default ""
+        help
+            Tailscale pre-authentication key used for device registration.
+            Generate at https://login.tailscale.com/admin/settings/keys.
+            Can be overridden at runtime via NVS key "auth_key" in
+            namespace "tailscale".
+
+    config TAILSCALE_HOSTNAME
+        string "Hostname on Tailscale network"
+        depends on TAILSCALE_ENABLE
+        default "esp32-serial"
+        help
+            The device hostname as it will appear in the Tailscale admin console.
+            Can be overridden at runtime via NVS key "hostname".
+
+    config TAILSCALE_CONTROL_SERVER
+        string "Control server hostname"
+        depends on TAILSCALE_ENABLE
+        default "login.tailscale.com"
+        help
+            Tailscale control server hostname.  Change only for self-hosted
+            Headscale deployments.
+            Can be overridden at runtime via NVS key "ctrl_server".
+
+    config TAILSCALE_LISTEN_PORT
+        int "WireGuard listen port (0 = ephemeral)"
+        depends on TAILSCALE_ENABLE
+        range 0 65535
+        default 41641
+        help
+            UDP port for the WireGuard data plane.  Tailscale conventionally
+            uses 41641.  Set to 0 to use an ephemeral port.
+
+    config TAILSCALE_DERP_ONLY
+        bool "DERP-only mode (disable DISCO direct paths)"
+        depends on TAILSCALE_ENABLE
+        default n
+        help
+            Force all peer traffic through DERP relay servers.
+            Useful for debugging or in networks that block direct UDP.
+
+    config TAILSCALE_MAX_PEERS
+        int "Maximum number of Tailscale peers"
+        depends on TAILSCALE_ENABLE
+        range 1 16
+        default 8
+        help
+            Maximum number of Tailscale peers.  Sets WIREGUARD_MAX_PEERS
+            when Tailscale is enabled.  Each peer uses ~800 bytes of SRAM.
+
+endmenu

@@ -1,0 +1,8 @@
+version: "1.0.0"
+description: FTDI USB-to-Serial Host Driver for ESP32-S3
+url: https://github.com/espressif/esp-idf
+
+dependencies:
+  espressif/usb: "==1.1.0"
+  idf:
+    version: ">=5.0.0"

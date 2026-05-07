@@ -1,0 +1,9 @@
+menu "USB Host FTDI SIO Driver"
+
+    config USB_HOST_ENABLE_FTDI_SIO_DRIVER
+        bool "Enable FTDI USB Serial Converter Driver"
+        default n
+        help
+            Enable FTDI SIO USB host driver component.
+
+endmenu

@@ -1,0 +1,4 @@
+# Copy to Makefile.local (gitignored) and edit as needed.
+
+# Override target chip for `make set-target`
+# TARGET ?= esp32p4

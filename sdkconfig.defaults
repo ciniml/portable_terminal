@@ -1,0 +1,22 @@
+# Common defaults for tab5_claude_client (target-independent).
+# Per-target overrides live in sdkconfig.defaults.<target>.
+
+# OTA-friendly partition layout (see partitions.csv)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_TWO_OTA=n
+CONFIG_PARTITION_TABLE_SINGLE_APP=n
+
+# Bootloader rollback
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Reusable VPN/USB components are present in components/ but unused in Phase 1.
+# Disable Tailscale to avoid pulling in TLS/lwIP tuning until Phase 3+.
+CONFIG_TAILSCALE_ENABLE=n
+
+# C++ exceptions off (default), but enable RTTI for std::expected helpers
+# if needed by future code. Keep size optimization for OTA partitions.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

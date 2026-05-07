@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstdint>
+
+#include "term_core/color.hpp"
+
+namespace term {
+
+struct Attrs {
+    bool bold : 1 = false;
+    bool faint : 1 = false;
+    bool italic : 1 = false;
+    bool underline : 1 = false;
+    bool blink : 1 = false;
+    bool reverse : 1 = false;
+    bool hidden : 1 = false;
+    bool strike : 1 = false;
+
+    constexpr bool operator==(const Attrs&) const = default;
+};
+
+struct Cell {
+    char32_t ch{U' '};
+    Color fg{Color::default_color()};
+    Color bg{Color::default_color()};
+    Attrs attrs{};
+
+    constexpr bool operator==(const Cell&) const = default;
+};
+
+}  // namespace term
