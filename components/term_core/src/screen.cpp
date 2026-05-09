@@ -66,6 +66,8 @@ void Screen::reset() {
     cursor_row_ = 0;
     cursor_col_ = 0;
     wrap_pending_ = false;
+    autowrap_ = true;
+    cursor_visible_ = true;
     scroll_top_ = 0;
     scroll_bot_ = rows_;
     cur_attrs_ = {};
@@ -161,6 +163,108 @@ void Screen::scroll_down(uint16_t n) {
         }
     }
     mark_rect(scroll_top_, 0, scroll_bot_, cols_);
+}
+
+void Screen::insert_lines(uint16_t n) {
+    if (cursor_row_ < scroll_top_ || cursor_row_ >= scroll_bot_) return;
+    if (n == 0) n = 1;
+    uint16_t region = static_cast<uint16_t>(scroll_bot_ - cursor_row_);
+    if (n > region) n = region;
+    // shift down
+    for (int r = int(scroll_bot_) - 1; r >= int(cursor_row_) + int(n); --r) {
+        for (uint16_t c = 0; c < cols_; ++c) {
+            mut(static_cast<uint16_t>(r), c) =
+                at(static_cast<uint16_t>(r - n), c);
+        }
+    }
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+    for (uint16_t r = cursor_row_;
+         r < cursor_row_ + n && r < scroll_bot_; ++r) {
+        for (uint16_t c = 0; c < cols_; ++c) {
+            mut(r, c) = blank;
+        }
+    }
+    mark_rect(cursor_row_, 0, scroll_bot_, cols_);
+    cursor_col_ = 0;
+    wrap_pending_ = false;
+}
+
+void Screen::delete_lines(uint16_t n) {
+    if (cursor_row_ < scroll_top_ || cursor_row_ >= scroll_bot_) return;
+    if (n == 0) n = 1;
+    uint16_t region = static_cast<uint16_t>(scroll_bot_ - cursor_row_);
+    if (n > region) n = region;
+    for (uint16_t r = cursor_row_; r + n < scroll_bot_; ++r) {
+        for (uint16_t c = 0; c < cols_; ++c) {
+            mut(r, c) = at(static_cast<uint16_t>(r + n), c);
+        }
+    }
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+    for (uint16_t r = static_cast<uint16_t>(scroll_bot_ - n);
+         r < scroll_bot_; ++r) {
+        for (uint16_t c = 0; c < cols_; ++c) {
+            mut(r, c) = blank;
+        }
+    }
+    mark_rect(cursor_row_, 0, scroll_bot_, cols_);
+    cursor_col_ = 0;
+    wrap_pending_ = false;
+}
+
+void Screen::insert_chars(uint16_t n) {
+    if (cursor_col_ >= cols_) return;
+    if (n == 0) n = 1;
+    if (n > cols_ - cursor_col_) n = static_cast<uint16_t>(cols_ - cursor_col_);
+    for (int c = int(cols_) - 1; c >= int(cursor_col_) + int(n); --c) {
+        mut(cursor_row_, static_cast<uint16_t>(c)) =
+            at(cursor_row_, static_cast<uint16_t>(c - n));
+    }
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+    for (uint16_t c = cursor_col_; c < cursor_col_ + n; ++c) {
+        mut(cursor_row_, c) = blank;
+    }
+    mark_range(cursor_row_, cursor_col_, cols_);
+    wrap_pending_ = false;
+}
+
+void Screen::delete_chars(uint16_t n) {
+    if (cursor_col_ >= cols_) return;
+    if (n == 0) n = 1;
+    if (n > cols_ - cursor_col_) n = static_cast<uint16_t>(cols_ - cursor_col_);
+    for (uint16_t c = cursor_col_; c + n < cols_; ++c) {
+        mut(cursor_row_, c) = at(cursor_row_, static_cast<uint16_t>(c + n));
+    }
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+    for (uint16_t c = static_cast<uint16_t>(cols_ - n); c < cols_; ++c) {
+        mut(cursor_row_, c) = blank;
+    }
+    mark_range(cursor_row_, cursor_col_, cols_);
+    wrap_pending_ = false;
+}
+
+void Screen::erase_chars(uint16_t n) {
+    if (cursor_col_ >= cols_) return;
+    if (n == 0) n = 1;
+    uint16_t end = static_cast<uint16_t>(cursor_col_ + n);
+    if (end > cols_) end = cols_;
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+    for (uint16_t c = cursor_col_; c < end; ++c) {
+        mut(cursor_row_, c) = blank;
+    }
+    mark_range(cursor_row_, cursor_col_, end);
+    wrap_pending_ = false;
+}
+
+void Screen::set_dec_modes(std::span<const int> params, bool set) {
+    for (int p : params) {
+        switch (p) {
+            case 7:  autowrap_ = set; break;
+            case 25: cursor_visible_ = set; break;
+            // Other DEC private modes (alt screen 1049, mouse, etc.) are
+            // not yet implemented; silently ignored.
+            default: break;
+        }
+    }
 }
 
 void Screen::clear_cells(uint16_t r0, uint16_t c0, uint16_t r1, uint16_t c1) {
@@ -328,6 +432,7 @@ void Screen::put_char(char32_t ch) {
     }
     // Wide char that would not fit on the current line — wrap first.
     if (wide && cursor_col_ + 1 >= cols_) {
+        if (!autowrap_) return;  // can't fit and wrap is disabled — drop
         cursor_col_ = 0;
         line_feed();
     }
@@ -351,7 +456,7 @@ void Screen::put_char(char32_t ch) {
             cursor_col_ = static_cast<uint16_t>(cursor_col_ + 2);
         } else {
             cursor_col_ = static_cast<uint16_t>(cursor_col_ + 1);
-            wrap_pending_ = true;
+            if (autowrap_) wrap_pending_ = true;
         }
         return;
     }
@@ -362,10 +467,11 @@ void Screen::put_char(char32_t ch) {
     mark(cursor_row_, cursor_col_);
     if (cursor_col_ + 1 < cols_) {
         ++cursor_col_;
-    } else {
+    } else if (autowrap_) {
         // last column: defer wrap until next printable char.
         wrap_pending_ = true;
     }
+    // else: cursor stays at last column; subsequent prints overwrite.
 }
 
 
@@ -452,11 +558,32 @@ void Screen::csi(char final_byte,
         case 'K':
             erase_line(params.empty() ? 0 : params[0]);
             break;
+        case 'L':
+            insert_lines(static_cast<uint16_t>(get(0, 1)));
+            break;
+        case 'M':
+            delete_lines(static_cast<uint16_t>(get(0, 1)));
+            break;
+        case 'P':
+            delete_chars(static_cast<uint16_t>(get(0, 1)));
+            break;
         case 'S':
             scroll_up(static_cast<uint16_t>(get(0, 1)));
             break;
         case 'T':
             scroll_down(static_cast<uint16_t>(get(0, 1)));
+            break;
+        case 'X':
+            erase_chars(static_cast<uint16_t>(get(0, 1)));
+            break;
+        case '@':
+            insert_chars(static_cast<uint16_t>(get(0, 1)));
+            break;
+        case 'h':
+            if (private_marker) set_dec_modes(params, true);
+            break;
+        case 'l':
+            if (private_marker) set_dec_modes(params, false);
             break;
         case 'm':
             if (!private_marker) apply_sgr(params);

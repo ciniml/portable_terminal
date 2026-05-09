@@ -24,6 +24,9 @@ public:
     uint16_t cursor_row() const { return cursor_row_; }
     uint16_t cursor_col() const { return cursor_col_; }
 
+    bool cursor_visible() const { return cursor_visible_; }
+    bool autowrap() const { return autowrap_; }
+
     // Damage region (smallest bounding box of all cells modified since
     // the last take_damage() call). After taking, the region is reset.
     DamageRect take_damage();
@@ -62,6 +65,14 @@ private:
     void erase_line(int mode);
     void clear_cells(uint16_t r0, uint16_t c0, uint16_t r1, uint16_t c1);
 
+    void insert_lines(uint16_t n);
+    void delete_lines(uint16_t n);
+    void insert_chars(uint16_t n);
+    void delete_chars(uint16_t n);
+    void erase_chars(uint16_t n);
+
+    void set_dec_modes(std::span<const int> params, bool set);
+
     void apply_sgr(std::span<const int> params);
 
     int param_or(std::span<const int> p, int idx, int def) const;
@@ -78,6 +89,10 @@ private:
     uint16_t cursor_row_{0};
     uint16_t cursor_col_{0};
     bool wrap_pending_{false};  // VT100 "last column" deferred wrap
+
+    // DEC modes (DECSET/DECRST `?h` / `?l`).
+    bool autowrap_{true};       // ?7 — wrap to next line at last column
+    bool cursor_visible_{true}; // ?25 — DECTCEM cursor visibility
 
     // Scroll region: [scroll_top_, scroll_bot_) inclusive top, exclusive bot.
     uint16_t scroll_top_{0};

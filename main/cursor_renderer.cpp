@@ -29,9 +29,11 @@ void CursorRenderer::draw() {
     uint16_t col = screen_.cursor_col();
     if (row >= screen_.rows() || col >= screen_.cols()) return;
 
-    if (drawn_ && (drawn_row_ != row || drawn_col_ != col)) {
-        erase();
-    }
+    if (drawn_) erase();
+
+    // Honour DECTCEM (?25) — apps toggle this to suppress the cursor while
+    // they redraw their UI.
+    if (!screen_.cursor_visible()) return;
 
     term::Cell c = screen_.at(row, col);
     c.attrs.reverse = !c.attrs.reverse;
@@ -55,7 +57,11 @@ void CursorRenderer::sync_after_render() {
 }
 
 void CursorRenderer::toggle_blink() {
-    if (drawn_) erase(); else draw();
+    if (drawn_) {
+        erase();
+    } else if (screen_.cursor_visible()) {
+        draw();
+    }
 }
 
 void CursorRenderer::set_visible(bool visible) {
