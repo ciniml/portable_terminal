@@ -54,19 +54,37 @@ Requirements: CMake ≥ 3.22, a C++23-capable compiler (GCC ≥ 13 / Clang ≥ 1
 ## Source layout
 
 ```
-main/                    Target entry point + future LCD / input glue
-components/term_core/    HW-independent VT100 core (IDF + host dual build)
-components/wireguard/    Reused from serial_wifi_logger (unused in Phase 1)
-components/tailscale/    Reused from serial_wifi_logger (unused in Phase 1)
-components/usb_host_ftdi_sio/   Reused from serial_wifi_logger (unused in Phase 1)
-host_test/               Standalone CMake project; gtest unit tests
-sdkconfig.defaults*      Project + per-target sdkconfig defaults
-partitions.csv           OTA-friendly partition layout (16 MB flash)
+main/                          Target entry: app_main, M5GFX-backed IDisplay
+components/term_core/          HW-independent VT100 core (IDF + host dual build)
+components/M5GFX/              git submodule — vendored M5GFX, patched for IDF 6.0
+components/M5Unified/          git submodule — vendored M5Unified, patched for IDF 6.0
+components/wireguard/          From serial_wifi_logger (unused in Phase 1)
+components/tailscale/          From serial_wifi_logger (unused in Phase 1)
+components/usb_host_ftdi_sio/  From serial_wifi_logger (unused in Phase 1)
+host_test/                     Standalone CMake project; gtest unit tests
+sdkconfig.defaults*            Project + per-target sdkconfig defaults
+partitions.csv                 OTA-friendly partition layout (16 MB flash)
+M5_IDF6_PATCHES.md             Notes on local M5GFX/M5Unified IDF 6.0 patches
 ```
 
 `term_core` exposes a single HAL boundary (`include/term_core/idisplay.hpp`).
-On hardware, `main/` provides the `IDisplay` implementation; in tests,
+On hardware, `main/display_m5gfx.cpp` implements that interface against
+M5Unified / M5GFX (Tab5 LCD). In host tests,
 `host_test/fakes/fake_display.hpp` records draw calls into a 2D buffer.
+
+## Submodules
+
+`components/M5GFX` and `components/M5Unified` are git submodules. After
+`git clone`, run:
+
+```bash
+git submodule update --init --recursive
+```
+
+Both submodules carry **local patches** (see `M5_IDF6_PATCHES.md`) needed to
+build under ESP-IDF 6.0. `git status` will show the submodules as dirty —
+this is expected. `git submodule update` overwrites the patches; reapply them
+from `M5_IDF6_PATCHES.md` when re-syncing upstream.
 
 ## Reusable components
 
@@ -75,3 +93,7 @@ On hardware, `main/` provides the `IDisplay` implementation; in tests,
 are present in the IDF build but disabled at runtime in Phase 1
 (`CONFIG_TAILSCALE_ENABLE=n`). Re-sync from upstream periodically — there is
 no automation for this yet.
+
+`espressif/usb` (transitively required by `usb_host_ftdi_sio`) is pinned to
+`==1.1.0` in the FTDI manifest. Newer registry releases break the IDF 6.0
+DWC HAL build.
