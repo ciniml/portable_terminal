@@ -2,12 +2,14 @@ idf_component_register(
     SRCS
         "app_main.cpp"
         "display_m5gfx.cpp"
+        "input_usb_jtag.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core
         M5Unified
         M5GFX
-        # carried for later phases (unused in Phase 1):
+        esp_driver_usb_serial_jtag
+        # carried for later phases (unused yet):
         wireguard
         tailscale
         usb_host_ftdi_sio
