@@ -5,12 +5,14 @@ idf_component_register(
         "cursor_renderer.cpp"
         "display_m5gfx.cpp"
         "input_usb_jtag.cpp"
+        "input_uart.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core
         M5Unified
         M5GFX
         esp_driver_usb_serial_jtag
+        esp_driver_uart
         esp_timer
         # carried for later phases (unused yet):
         wireguard

@@ -1,0 +1,40 @@
+menu "Tab5 terminal"
+
+    config TAB5_UART_INPUT_ENABLED
+        bool "Enable external UART byte-input source"
+        default y
+        help
+            When enabled, the terminal also reads bytes from a UART
+            peripheral (in addition to USB-Serial-JTAG) and feeds them
+            into the VT100 core. Default pins target Tab5 Port-A.
+
+    config TAB5_UART_INPUT_PORT
+        int "UART port index"
+        depends on TAB5_UART_INPUT_ENABLED
+        default 1
+        range 0 2
+        help
+            UART_NUM_x to use. UART_NUM_0 is normally the console UART
+            on chips that route the console there; on ESP32-P4 the
+            console is USB-Serial-JTAG so UART_NUM_0 is free.
+
+    config TAB5_UART_INPUT_TX_GPIO
+        int "UART TX GPIO"
+        depends on TAB5_UART_INPUT_ENABLED
+        default 54
+        help
+            GPIO used as UART TX. Tab5 Port-A SCL is GPIO 54.
+
+    config TAB5_UART_INPUT_RX_GPIO
+        int "UART RX GPIO"
+        depends on TAB5_UART_INPUT_ENABLED
+        default 53
+        help
+            GPIO used as UART RX. Tab5 Port-A SDA is GPIO 53.
+
+    config TAB5_UART_INPUT_BAUD
+        int "Baud rate"
+        depends on TAB5_UART_INPUT_ENABLED
+        default 115200
+
+endmenu

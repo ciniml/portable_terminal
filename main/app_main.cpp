@@ -1,8 +1,10 @@
-// Phase 2 step 2: USB-Serial-JTAG byte input flows into the VT100 core,
-// with cooked-mode mapping (Enter -> CRLF, BS/DEL -> visible erase) and
-// a blinking block cursor at the terminal cursor position.
+// Phase 2 step 3: byte input from USB-Serial-JTAG and an external UART
+// (Tab5 Port-A by default) flow into the VT100 core. Each source has
+// its own cooked-input filter so cross-source CR/LF state stays
+// independent. Cursor renderer + 1 Hz blink unchanged from step 2.
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -12,11 +14,16 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
+#include "byte_input.hpp"
 #include "cooked_input.hpp"
 #include "cursor_renderer.hpp"
 #include "display_m5gfx.hpp"
 #include "input_usb_jtag.hpp"
+#if CONFIG_TAB5_UART_INPUT_ENABLED
+#include "input_uart.hpp"
+#endif
 #include "term_core/terminal.hpp"
 
 namespace {
@@ -26,8 +33,6 @@ constexpr uint16_t kCols = 80;
 constexpr uint16_t kRows = 30;
 constexpr int64_t kBlinkPeriodUs = 500 * 1000;
 
-// Single mutex serialises terminal / cursor / display access between the
-// USB-JTAG input task and the esp_timer task that drives the cursor blink.
 SemaphoreHandle_t g_mutex = nullptr;
 tab5::CursorRenderer* g_cursor = nullptr;
 
@@ -45,10 +50,26 @@ void on_blink_tick(void* /*arg*/) {
     g_cursor->toggle_blink();
 }
 
+// Build a sink that owns its own CookedInputFilter so each input source
+// (USB-JTAG, UART, future Telnet/SSH) tracks CR/LF state independently.
+// The sink itself locks the global mutex and forwards through the
+// shared terminal + cursor.
+template <class TerminalApply>
+tab5::ByteSink make_source_sink(TerminalApply&& apply) {
+    auto state = std::make_shared<tab5::CookedInputFilter>();
+    return [state, apply](std::span<const uint8_t> bytes) mutable {
+        std::vector<uint8_t> mapped;
+        mapped.reserve(bytes.size() * 3);
+        state->process(bytes, mapped);
+        Lock lk;
+        apply(std::span<const uint8_t>(mapped.data(), mapped.size()));
+    };
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
-    ESP_LOGI(kTag, "Tab5 terminal — Phase 2 step 2 boot");
+    ESP_LOGI(kTag, "Tab5 terminal — Phase 2 step 3 boot");
 
     g_mutex = xSemaphoreCreateMutex();
 
@@ -62,13 +83,13 @@ extern "C" void app_main(void) {
 
     static term::Terminal terminal(kCols, kRows, display);
     static tab5::CursorRenderer cursor(terminal.screen(), display);
-    static tab5::CookedInputFilter cooked;
     g_cursor = &cursor;
 
     using namespace std::string_view_literals;
     constexpr auto kBoot =
         "\x1b[2J\x1b[H"
-        "\x1b[1;32mTab5 Terminal\x1b[0m  \x1b[2m(USB-JTAG input)\x1b[0m\r\n"
+        "\x1b[1;32mTab5 Terminal\x1b[0m  "
+        "\x1b[2m(USB-JTAG + UART input)\x1b[0m\r\n"
         "\x1b[33mtype here; Enter / Backspace work\x1b[0m\r\n"
         "\r\n"sv;
     {
@@ -78,7 +99,6 @@ extern "C" void app_main(void) {
         cursor.draw();
     }
 
-    // Cursor blink (500 ms half-period -> 1 Hz visible flash).
     const esp_timer_create_args_t blink_args = {
         .callback = &on_blink_tick,
         .arg = nullptr,
@@ -90,21 +110,30 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(esp_timer_create(&blink_args, &blink_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(blink_timer, kBlinkPeriodUs));
 
-    auto sink = [](std::span<const uint8_t> bytes) {
-        static std::vector<uint8_t> mapped;
-        mapped.clear();
-        cooked.process(bytes, mapped);
-
-        Lock lk;
+    auto apply = [](std::span<const uint8_t> mapped) {
+        // mutex already held by caller (Lock in make_source_sink)
         cursor.erase();
-        (void)terminal.feed(std::span<const uint8_t>(mapped.data(),
-                                                     mapped.size()));
+        (void)terminal.feed(mapped);
         (void)terminal.render_dirty();
         cursor.draw();
     };
-    if (auto rc = tab5::start_usb_jtag_input(sink); !rc) {
+
+    if (auto rc = tab5::start_usb_jtag_input(make_source_sink(apply)); !rc) {
         ESP_LOGE(kTag, "USB-JTAG input start failed");
     }
+
+#if CONFIG_TAB5_UART_INPUT_ENABLED
+    tab5::UartInputConfig uart_cfg{
+        .port = CONFIG_TAB5_UART_INPUT_PORT,
+        .tx_gpio = CONFIG_TAB5_UART_INPUT_TX_GPIO,
+        .rx_gpio = CONFIG_TAB5_UART_INPUT_RX_GPIO,
+        .baud = CONFIG_TAB5_UART_INPUT_BAUD,
+    };
+    if (auto rc = tab5::start_uart_input(uart_cfg, make_source_sink(apply));
+        !rc) {
+        ESP_LOGE(kTag, "UART input start failed");
+    }
+#endif
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
