@@ -24,7 +24,10 @@ Screen::Screen(uint16_t cols, uint16_t rows)
       rows_(rows),
       grid_(static_cast<size_t>(cols) * rows),
       scroll_top_(0),
-      scroll_bot_(rows) {}
+      scroll_bot_(rows) {
+    backup_.grid.resize(static_cast<size_t>(cols) * rows);
+    backup_.scroll_bot = rows;
+}
 
 const Cell& Screen::at(uint16_t row, uint16_t col) const {
     return grid_[static_cast<size_t>(row) * cols_ + col];
@@ -260,11 +263,61 @@ void Screen::set_dec_modes(std::span<const int> params, bool set) {
         switch (p) {
             case 7:  autowrap_ = set; break;
             case 25: cursor_visible_ = set; break;
-            // Other DEC private modes (alt screen 1049, mouse, etc.) are
-            // not yet implemented; silently ignored.
+            case 47:
+            case 1047:
+            case 1049:
+                if (set) enter_alt_screen(); else exit_alt_screen();
+                break;
+            // Other DEC private modes (mouse, paste, etc.) are not yet
+            // implemented; silently ignored.
             default: break;
         }
     }
+}
+
+void Screen::swap_with_backup() {
+    using std::swap;
+    swap(grid_, backup_.grid);
+    swap(cursor_row_, backup_.cursor_row);
+    swap(cursor_col_, backup_.cursor_col);
+    swap(wrap_pending_, backup_.wrap_pending);
+    swap(scroll_top_, backup_.scroll_top);
+    swap(scroll_bot_, backup_.scroll_bot);
+    swap(cur_attrs_, backup_.cur_attrs);
+    swap(cur_fg_, backup_.cur_fg);
+    swap(cur_bg_, backup_.cur_bg);
+    swap(saved_row_, backup_.saved_row);
+    swap(saved_col_, backup_.saved_col);
+    swap(saved_attrs_, backup_.saved_attrs);
+    swap(saved_fg_, backup_.saved_fg);
+    swap(saved_bg_, backup_.saved_bg);
+    swap(has_saved_, backup_.has_saved);
+}
+
+void Screen::enter_alt_screen() {
+    if (alt_active_) return;
+    swap_with_backup();
+    // Newly-active alt screen starts cleared with default state.
+    Cell blank{};
+    std::fill(grid_.begin(), grid_.end(), blank);
+    cursor_row_ = 0;
+    cursor_col_ = 0;
+    wrap_pending_ = false;
+    scroll_top_ = 0;
+    scroll_bot_ = rows_;
+    cur_attrs_ = {};
+    cur_fg_ = Color::default_color();
+    cur_bg_ = Color::default_color();
+    has_saved_ = false;
+    alt_active_ = true;
+    mark_rect(0, 0, rows_, cols_);
+}
+
+void Screen::exit_alt_screen() {
+    if (!alt_active_) return;
+    swap_with_backup();
+    alt_active_ = false;
+    mark_rect(0, 0, rows_, cols_);
 }
 
 void Screen::clear_cells(uint16_t r0, uint16_t c0, uint16_t r1, uint16_t c1) {

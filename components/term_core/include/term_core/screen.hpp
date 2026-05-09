@@ -26,6 +26,7 @@ public:
 
     bool cursor_visible() const { return cursor_visible_; }
     bool autowrap() const { return autowrap_; }
+    bool alt_active() const { return alt_active_; }
 
     // Damage region (smallest bounding box of all cells modified since
     // the last take_damage() call). After taking, the region is reset.
@@ -73,6 +74,9 @@ private:
 
     void set_dec_modes(std::span<const int> params, bool set);
 
+    void enter_alt_screen();
+    void exit_alt_screen();
+
     void apply_sgr(std::span<const int> params);
 
     int param_or(std::span<const int> p, int idx, int def) const;
@@ -112,6 +116,31 @@ private:
     Color cur_bg_{Color::default_color()};
 
     DamageRect damage_{};
+
+    // Alt-screen support (DECSET ?1049 / ?1047 / ?47). Holds whichever
+    // screen is currently inactive — swapped wholesale on transition.
+    // autowrap_ and cursor_visible_ remain shared across both screens.
+    struct ScreenBackup {
+        std::vector<Cell> grid;
+        uint16_t cursor_row{0};
+        uint16_t cursor_col{0};
+        bool wrap_pending{false};
+        uint16_t scroll_top{0};
+        uint16_t scroll_bot{0};
+        Attrs cur_attrs{};
+        Color cur_fg{Color::default_color()};
+        Color cur_bg{Color::default_color()};
+        uint16_t saved_row{0};
+        uint16_t saved_col{0};
+        Attrs saved_attrs{};
+        Color saved_fg{Color::default_color()};
+        Color saved_bg{Color::default_color()};
+        bool has_saved{false};
+    };
+    ScreenBackup backup_{};
+    bool alt_active_{false};
+
+    void swap_with_backup();
 };
 
 }  // namespace term

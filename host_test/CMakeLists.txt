@@ -29,6 +29,7 @@ add_executable(term_core_tests
     tests/terminal_golden_test.cpp
     tests/wide_char_test.cpp
     tests/csi_extensions_test.cpp
+    tests/alt_screen_test.cpp
 )
 target_link_libraries(term_core_tests PRIVATE term_core gtest_main gmock)
 target_include_directories(term_core_tests PRIVATE fakes)
