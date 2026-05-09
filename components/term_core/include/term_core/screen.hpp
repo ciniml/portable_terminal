@@ -66,6 +66,11 @@ private:
 
     int param_or(std::span<const int> p, int idx, int def) const;
 
+    // When overwriting a wide-pair half, replace its orphaned partner with
+    // `fill_cell` so the renderer never sees a dangling wide / wide_cont
+    // flag.
+    void clear_orphan_pair(uint16_t row, uint16_t col, const Cell& fill_cell);
+
     uint16_t cols_;
     uint16_t rows_;
     std::vector<Cell> grid_;

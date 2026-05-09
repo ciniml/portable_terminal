@@ -16,6 +16,13 @@ struct Attrs {
     bool hidden : 1 = false;
     bool strike : 1 = false;
 
+    // Wide-character (East Asian fullwidth) layout.
+    //   wide      : this cell holds the leading half of a 2-cell glyph
+    //   wide_cont : this cell is the continuation half (renderer should
+    //               skip drawing — the wide glyph spans into it)
+    bool wide : 1 = false;
+    bool wide_cont : 1 = false;
+
     constexpr bool operator==(const Attrs&) const = default;
 };
 

@@ -1,6 +1,7 @@
 #include "display_m5gfx.hpp"
 
 #include <algorithm>
+#include <cstddef>
 
 #include "M5Unified.h"
 
@@ -30,12 +31,10 @@ uint16_t color_to_565(term::Color c, uint32_t def_rgb) {
         case Kind::Index: {
             uint8_t i = uint8_t(c.value & 0xFF);
             if (i < 16) return to_565(kAnsiPalette[i]);
-            // 256-color: greyscale ramp 232-255
             if (i >= 232) {
                 uint8_t v = (i - 232) * 10 + 8;
                 return to_565((uint32_t(v) << 16) | (uint32_t(v) << 8) | v);
             }
-            // 6x6x6 cube 16-231
             uint8_t n = i - 16;
             uint8_t r = (n / 36) * 51;
             uint8_t g = ((n / 6) % 6) * 51;
@@ -46,6 +45,37 @@ uint16_t color_to_565(term::Color c, uint32_t def_rgb) {
     }
     return to_565(def_rgb);
 }
+
+// Encode `cp` as UTF-8 into `out` (max 4 bytes). Returns byte length.
+size_t encode_utf8(char32_t cp, char out[4]) {
+    if (cp < 0x80) {
+        out[0] = static_cast<char>(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        out[0] = static_cast<char>(0xC0 | (cp >> 6));
+        out[1] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = static_cast<char>(0xE0 | (cp >> 12));
+        out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = static_cast<char>(0xF0 | (cp >> 18));
+    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+// lgfxJapanGothic_24 (IPA Gothic, monospace) advances 12 px per half-width
+// glyph and 24 px per fullwidth. Unlike efontJA_*, this font includes the
+// halfwidth-katakana range U+FF61..U+FF9F. No bold variant ships with it,
+// so bold is emulated via a 1 px overstrike (see draw_cells).
+constexpr uint16_t kCellW = 12;
+constexpr uint16_t kCellH = 24;
 
 }  // namespace
 
@@ -58,12 +88,12 @@ term::Result<void> M5GfxDisplay::init() {
 
     M5.Display.setRotation(1);
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setFont(&fonts::Font0);
-    M5.Display.setTextSize(2);
+    M5.Display.setFont(&fonts::lgfxJapanGothic_24);
+    M5.Display.setTextSize(1);
     M5.Display.setTextDatum(top_left);
 
-    cell_w_ = M5.Display.textWidth("M");          // ~12 px at size 2
-    cell_h_ = M5.Display.fontHeight();            // ~16 px at size 2
+    cell_w_ = kCellW;
+    cell_h_ = kCellH;
 
     uint16_t needed_w = uint32_t(cell_w_) * cols_;
     uint16_t needed_h = uint32_t(cell_h_) * rows_;
@@ -71,7 +101,6 @@ term::Result<void> M5GfxDisplay::init() {
     uint16_t screen_h = M5.Display.height();
     origin_x_ = (screen_w > needed_w) ? (screen_w - needed_w) / 2 : 0;
     origin_y_ = (screen_h > needed_h) ? (screen_h - needed_h) / 2 : 0;
-
     return {};
 }
 
@@ -85,11 +114,9 @@ term::Result<void> M5GfxDisplay::draw_cells(uint16_t row, uint16_t col,
     int y = origin_y_ + int(row) * cell_h_;
     for (size_t i = 0; i < cells.size(); ++i) {
         const auto& cell = cells[i];
+        if (cell.attrs.wide_cont) continue;  // covered by the leading half
 
-        // ANSI convention: bold promotes the standard 8 colors to the
-        // bright (high-intensity) palette entry. Font0 has no separate
-        // bold glyph, so we additionally overstrike one pixel to the
-        // right to thicken it.
+        // Bold remaps standard 8 -> bright 8 (the ANSI convention).
         term::Color fg_src = cell.fg;
         if (cell.attrs.bold &&
             fg_src.kind == term::Color::Kind::Index &&
@@ -101,17 +128,23 @@ term::Result<void> M5GfxDisplay::draw_cells(uint16_t row, uint16_t col,
         if (cell.attrs.reverse) std::swap(fg, bg);
 
         int x = origin_x_ + (int(col) + int(i)) * cell_w_;
-        d.fillRect(x, y, cell_w_, cell_h_, bg);
+        int w = cell.attrs.wide ? (cell_w_ * 2) : cell_w_;
+        d.fillRect(x, y, w, cell_h_, bg);
 
-        if (cell.ch >= 0x20 && cell.ch < 0x7F) {
-            d.setTextColor(fg, bg);
-            d.setCursor(x, y);
-            d.print(static_cast<char>(cell.ch));
-            if (cell.attrs.bold) {
-                d.setTextColor(fg);  // transparent bg for the overstrike
-                d.setCursor(x + 1, y);
-                d.print(static_cast<char>(cell.ch));
-            }
+        // Skip rendering for blank cells — fillRect already painted the bg.
+        if (cell.ch == U' ' || cell.ch == 0) continue;
+
+        d.setTextColor(fg, bg);
+        d.setCursor(x, y);
+        char utf8[5];
+        size_t n = encode_utf8(cell.ch, utf8);
+        utf8[n] = '\0';
+        d.print(utf8);
+        if (cell.attrs.bold) {
+            // No bold IPA variant ships with M5GFX; thicken via overstrike.
+            d.setTextColor(fg);
+            d.setCursor(x + 1, y);
+            d.print(utf8);
         }
     }
     d.endWrite();
@@ -119,7 +152,7 @@ term::Result<void> M5GfxDisplay::draw_cells(uint16_t row, uint16_t col,
 }
 
 term::Result<void> M5GfxDisplay::flush(term::DamageRect) {
-    return {};  // immediate-mode rendering; nothing to flush
+    return {};  // immediate-mode rendering
 }
 
 }  // namespace tab5

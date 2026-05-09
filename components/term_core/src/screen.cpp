@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "term_core/east_asian_width.hpp"
+
 namespace term {
 
 namespace {
@@ -293,13 +295,68 @@ void Screen::apply_sgr(std::span<const int> params) {
 
 // IParserSink ----------------------------------------------------------------
 
+void Screen::clear_orphan_pair(uint16_t row, uint16_t col,
+                               const Cell& fill_cell) {
+    if (col >= cols_) return;
+    const Cell& victim = at(row, col);
+    if (victim.attrs.wide && col + 1 < cols_) {
+        // Replacing the leading half — strip continuation next.
+        Cell& next = mut(row, static_cast<uint16_t>(col + 1));
+        if (next.attrs.wide_cont) {
+            next = fill_cell;
+            mark(row, static_cast<uint16_t>(col + 1));
+        }
+    }
+    if (victim.attrs.wide_cont && col > 0) {
+        Cell& prev = mut(row, static_cast<uint16_t>(col - 1));
+        if (prev.attrs.wide) {
+            prev = fill_cell;
+            mark(row, static_cast<uint16_t>(col - 1));
+        }
+    }
+}
+
 void Screen::put_char(char32_t ch) {
     if (cols_ == 0 || rows_ == 0) return;
+    bool wide = is_wide_char(ch);
+
+    // Honour deferred wrap from a previous put_char that filled the last col.
     if (wrap_pending_) {
         cursor_col_ = 0;
         line_feed();
         wrap_pending_ = false;
     }
+    // Wide char that would not fit on the current line — wrap first.
+    if (wide && cursor_col_ + 1 >= cols_) {
+        cursor_col_ = 0;
+        line_feed();
+    }
+
+    Cell blank{U' ', cur_fg_, cur_bg_, cur_attrs_};
+
+    if (wide) {
+        // Clean up orphans on either side of the new pair before installing.
+        clear_orphan_pair(cursor_row_, cursor_col_, blank);
+        clear_orphan_pair(cursor_row_,
+                          static_cast<uint16_t>(cursor_col_ + 1), blank);
+        Cell head{ch, cur_fg_, cur_bg_, cur_attrs_};
+        head.attrs.wide = true;
+        Cell cont = blank;
+        cont.attrs.wide_cont = true;
+        mut(cursor_row_, cursor_col_) = head;
+        mut(cursor_row_, static_cast<uint16_t>(cursor_col_ + 1)) = cont;
+        mark(cursor_row_, cursor_col_);
+        mark(cursor_row_, static_cast<uint16_t>(cursor_col_ + 1));
+        if (cursor_col_ + 2 < cols_) {
+            cursor_col_ = static_cast<uint16_t>(cursor_col_ + 2);
+        } else {
+            cursor_col_ = static_cast<uint16_t>(cursor_col_ + 1);
+            wrap_pending_ = true;
+        }
+        return;
+    }
+
+    clear_orphan_pair(cursor_row_, cursor_col_, blank);
     Cell c{ch, cur_fg_, cur_bg_, cur_attrs_};
     mut(cursor_row_, cursor_col_) = c;
     mark(cursor_row_, cursor_col_);
@@ -310,6 +367,7 @@ void Screen::put_char(char32_t ch) {
         wrap_pending_ = true;
     }
 }
+
 
 void Screen::execute(uint8_t c0) {
     switch (c0) {

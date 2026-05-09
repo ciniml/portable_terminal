@@ -90,7 +90,9 @@ extern "C" void app_main(void) {
         "\x1b[2J\x1b[H"
         "\x1b[1;32mTab5 Terminal\x1b[0m  "
         "\x1b[2m(USB-JTAG + UART input)\x1b[0m\r\n"
-        "\x1b[33mtype here; Enter / Backspace work\x1b[0m\r\n"
+        "\x1b[33mtype here — Enter / Backspace work\x1b[0m\r\n"
+        "\x1b[36m日本語: \x1b[1;33mあいうえお漢字\x1b[0m  "
+        "\x1b[35m한글\x1b[0m  \x1b[32m中文\x1b[0m\r\n"
         "\r\n"sv;
     {
         Lock lk;
