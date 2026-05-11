@@ -3,6 +3,7 @@ build-*/
 sdkconfig
 sdkconfig.old
 sdkconfig.local
+sdkconfig.defaults.local
 Makefile.local
 managed_components/
 dependencies.lock

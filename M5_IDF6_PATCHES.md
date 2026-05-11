@@ -74,3 +74,59 @@ The shims above let Speaker/Mic **compile** under IDF 6.0; their actual
 runtime behavior is **not validated**. The IDF 6 I2S API is sufficiently
 different that the audio code paths will likely need a proper port before
 audio works. Phase 1b only exercises display rendering, so this is deferred.
+
+## espressif/esp_hosted 2.12.7 — Tab5 SDIO link
+
+`managed_components/espressif__esp_hosted` is fetched by the IDF component
+manager (not a submodule); `git status` does not surface its dirty state.
+The single patch below is required for Wi-Fi via the on-board C6 to come
+up on Tab5; without it `sdmmc_init_ocr` (CMD5 / `send_op_cond`) times out
+with `0x107` forever.
+
+If the managed component is re-downloaded (`rm -rf
+managed_components/espressif__esp_hosted` + rebuild), the patch must be
+re-applied.
+
+### `host/drivers/transport/sdio/sdio_drv.c` — `transport_gpio_reset()`
+
+Upstream's reset pulse leaves the slave's CHIP_EN line driven to the
+`ACTIVE` level on exit:
+```c
+write_gpio(reset_pin, H_RESET_VAL_ACTIVE);
+msleep(10);
+write_gpio(reset_pin, H_RESET_VAL_INACTIVE);
+msleep(10);
+write_gpio(reset_pin, H_RESET_VAL_ACTIVE);    /* <-- chip ends in reset */
+msleep(H_HOST_SDIO_RESET_DELAY_MS);
+```
+On Tab5 the reset GPIO (`GPIO 15`) is wired straight to the C6's CHIP_EN
+(active high), so `H_RESET_VAL_ACTIVE` = LOW = chip held disabled. The
+subsequent `sdmmc_card_init()` issues CMD5 against a chip that's still in
+reset and times out.
+
+In esp_hosted 1.4 (the version M5Tab5-UserDemo uses on IDF 5.4) this
+worked because the SDMMC bus was initialised inside
+`transport_init_internal()` — BEFORE the reset pulse, while the C6 was
+still in its freshly-booted state. In 2.x the order is reversed.
+
+The local patch comments out the trailing `ACTIVE` write so the C6 is
+left running (`H_RESET_VAL_INACTIVE` = HIGH) when CMD5 finally arrives.
+
+## espressif/esp_hosted 1.4.0 — c6_updater quirks
+
+The IDF 5.4 updater under `c6_updater/` pulls in `espressif/esp_hosted
+==1.4.0`, which still misses two REQUIRES in its CMakeLists.txt:
+
+- `esp_wifi` (its public headers expose `esp_wifi.h`)
+- `esp_driver_sdmmc` (its public headers expose `driver/sdmmc_host.h`)
+
+These are declared in `c6_updater/main/CMakeLists.txt` PRIV_REQUIRES so
+the linker pulls them in even though the esp_hosted manifest doesn't.
+
+The updater also patches the slave's `idf_component.yml` at build time
+(`slave_c6_fw/build.sh`) to drop the broken `cmd_system` example
+dependency — IDF 6.0's `cmd_system_sleep.c` calls
+`esp_sleep_get_wakeup_causes()` without listing `esp_hw_support` in its
+REQUIRES, so the slave build dies before producing
+`network_adapter.bin`. We don't use cmd_system, so the dep is just
+deleted.

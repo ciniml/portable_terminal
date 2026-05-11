@@ -86,6 +86,51 @@ build under ESP-IDF 6.0. `git status` will show the submodules as dirty —
 this is expected. `git submodule update` overwrites the patches; reapply them
 from `M5_IDF6_PATCHES.md` when re-syncing upstream.
 
+## Wi-Fi (ESP32-C6 co-processor)
+
+Tab5's Wi-Fi radio lives on an on-board ESP32-C6 reachable from the P4
+over SDIO. We use `espressif/esp_hosted` (^2.12.7) +
+`espressif/esp_wifi_remote` (^1.5.1) so that standard `esp_wifi_*` APIs
+work transparently against the C6. SDIO pin assignments and bus
+parameters come from `sdkconfig.defaults.esp32p4`; PI4IOE2 (0x44) bit 0
+is driven HIGH at runtime to power the C6 — see
+`main/wifi_setup.cpp::pi4ioe2_init_for_wifi` and `tab5_c6_power_enable`.
+
+**The C6 must be running a slave firmware that matches our esp_hosted
+2.x line.** Tab5 ships from the factory with M5Stack's V1.4.1
+(`ESP32C6-WiFi-SDIO-Interface-V1.4.1-*.bin`), which speaks esp_hosted
+1.4.x — incompatible with our host. Two ways to update the C6:
+
+#### (Preferred) SDIO-only update via the bundled IDF 5.4 updater
+
+`c6_updater/` is a self-contained IDF 5.4.2 project. It speaks
+esp_hosted 1.4.0 (factory-compatible), pulls in the SDIO bus the
+factory firmware already accepts, and pushes the new 2.x slave we
+embed into it via `rpc_ota_begin/write/end`. No cover removal needed.
+
+```bash
+./c6_updater/updater.sh /dev/ttyACM0   # build + flash + monitor in one shot
+```
+
+Watch the monitor for `Slave update completed`, then reflash the
+IDF 6.0 main app over it with `make flash monitor` from the project root.
+
+#### (Fallback) Physical UART flash via ESP-Prog
+
+If the SDIO-only updater fails (e.g. the C6 firmware is non-factory or
+broken), open the Tab5 cover and wire an ESP-Prog to the C6 programming
+pads per `slave_c6_fw/README.md`:
+
+```bash
+./slave_c6_fw/build.sh                 # builds via managed_components/.../slave
+./slave_c6_fw/flash.sh /dev/ttyUSB0    # after wiring the adapter
+```
+
+Configure SSID / PSK via `idf.py menuconfig` → "Tab5 terminal" → "Wi-Fi".
+Wi-Fi is gated on `CONFIG_TAB5_WIFI_ENABLED` (default off) so a fresh
+clone still builds and runs without a configured network or a re-flashed
+C6.
+
 ## Reusable components
 
 `wireguard`, `tailscale`, and `usb_host_ftdi_sio` are vendored from

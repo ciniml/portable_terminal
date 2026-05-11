@@ -1,0 +1,18 @@
+# Copy to sdkconfig.defaults.local (gitignored) and put host-specific
+# overrides here. The Makefile chains this file after
+# sdkconfig.defaults and sdkconfig.defaults.<target>, so any values here
+# take precedence over committed defaults but are never staged in git.
+#
+# Re-trigger a sdkconfig regeneration after editing:
+#   rm sdkconfig && make build
+
+# --- Wi-Fi ------------------------------------------------------------
+# CONFIG_TAB5_WIFI_ENABLED=y
+# CONFIG_TAB5_WIFI_SSID="my-home-ssid"
+# CONFIG_TAB5_WIFI_PSK="my-home-passphrase"
+# CONFIG_TAB5_WIFI_CONNECT_TIMEOUT_S=20
+
+# --- UART input (if your Tab5 wiring uses different pins) -------------
+# CONFIG_TAB5_UART_INPUT_TX_GPIO=54
+# CONFIG_TAB5_UART_INPUT_RX_GPIO=53
+# CONFIG_TAB5_UART_INPUT_BAUD=115200
