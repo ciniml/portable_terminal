@@ -20,3 +20,9 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Main task hosts the boot path that runs SSH handshake (libssh2 +
+# mbedTLS + lwIP are chunky on stack — handshake alone uses ~6 KB). The
+# 3.5 KB IDF default overflows once libssh2 trace is enabled and is
+# uncomfortably tight even without it.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
