@@ -10,6 +10,7 @@ idf_component_register(
         "soft_keyboard.cpp"
         "wifi_setup.cpp"
         "connection.cpp"
+        "reconnect.cpp"
         "ssh_connection.cpp"
         "telnet_connection.cpp"
         "status_bar.cpp"

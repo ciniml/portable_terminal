@@ -41,6 +41,9 @@ struct Session {
     StreamBufferHandle_t tx = nullptr;
     ByteSink rx_apply;
     std::atomic<bool> running{false};
+    // See SshConnection::start for rationale — gate restart on full
+    // teardown of the previous task.
+    std::atomic<bool> task_alive{false};
 
     // Reported pty size — sent via NAWS SB right after server says DO NAWS,
     // and again whenever resize() is called.
@@ -102,6 +105,13 @@ bool dial(const char* host, uint16_t port) {
     }
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+    int idle = 30;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+    int intv = 10;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv));
+    int cnt = 3;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT,   &cnt, sizeof(cnt));
     g_sess.sock = s;
     return true;
 }
@@ -227,6 +237,7 @@ bool process_rx(const uint8_t* buf, size_t n) {
 }
 
 void telnet_task(void*) {
+    g_sess.task_alive.store(true);
     uint8_t rxbuf[kIoChunk];
     uint8_t txbuf[kIoChunk];
 
@@ -270,6 +281,7 @@ void telnet_task(void*) {
 
     ESP_LOGI(kTag, "telnet_task exiting");
     shutdown_session();
+    g_sess.task_alive.store(false);
     vTaskDelete(nullptr);
 }
 
@@ -284,6 +296,10 @@ TelnetConnection::TelnetConnection(const TelnetConfig& cfg) : cfg_(cfg) {
 TelnetConnection::~TelnetConnection() { stop(); }
 
 bool TelnetConnection::start(ByteSink rx_sink) {
+    if (g_sess.task_alive.load()) {
+        ESP_LOGD(kTag, "previous task still tearing down — caller should retry");
+        return false;
+    }
     if (g_sess.running) {
         ESP_LOGW(kTag, "already running");
         return false;

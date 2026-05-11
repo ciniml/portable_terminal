@@ -169,6 +169,32 @@ While a remote session is up, the input sinks bypass the
 fails, sinks fall back to the local-echo terminal so the device
 stays usable as a status display.
 
+### Auto-reconnect
+
+[main/reconnect.{hpp,cpp}](main/reconnect.cpp) spawns a supervisor
+task that watches `IConnection::is_connected()`. On a drop it
+waits with exponential backoff (1 s → 30 s) and calls `start()`
+again on the same connection object, then replays the current
+pty size via `resize()`. The supervisor outlives the boot path
+and handles transient Wi-Fi outages naturally (dial() inside
+start() just fails fast while Wi-Fi is down).
+
+Dead-link detection uses two complementary mechanisms:
+
+- TCP keepalive on the underlying socket — `SO_KEEPALIVE` with
+  `TCP_KEEPIDLE=30 s`, `TCP_KEEPINTVL=10 s`, `TCP_KEEPCNT=3` →
+  a stale remote / Wi-Fi outage surfaces as `recv` failure in
+  ~60 s.
+- SSH-level keepalive — `libssh2_keepalive_config` with a 30 s
+  interval; `ssh_task` calls `libssh2_keepalive_send` once a
+  second to actually emit packets (libssh2 doesn't drive them
+  on its own).
+
+The race between a dying I/O task tearing down its session and
+the supervisor's next `start()` is guarded by an internal
+`task_alive` atomic; `start()` refuses until the previous task
+fully exits.
+
 **Host-key verification: TOFU (Trust On First Use).** First connect to
 a given host:port records SHA-256 of `libssh2_session_hostkey()` in NVS
 namespace `"ssh_tofu"` (key is the 32-bit FNV-1a hash of "host:port",

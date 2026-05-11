@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
@@ -36,6 +37,11 @@ struct Session {
     StreamBufferHandle_t tx = nullptr;
     ByteSink rx_apply;
     std::atomic<bool> running{false};
+    // True from ssh_task entry until ssh_task has fully torn down its
+    // resources. start() refuses to re-enter while this is true so that
+    // a reconnect attempt from the supervisor can't race with the old
+    // task's shutdown_session().
+    std::atomic<bool> task_alive{false};
     char banner[96] = {0};
     // Pending pty resize. Producer: any thread via SshConnection::resize.
     // Consumer: ssh_task on its next poll. cols==0 means "no pending".
@@ -99,9 +105,19 @@ bool dial(const char* host, uint16_t port) {
         return false;
     }
 
-    // Enable TCP_NODELAY for low-latency keystrokes.
+    // TCP_NODELAY for low-latency keystrokes; SO_KEEPALIVE + tight
+    // intervals so a dead remote / Wi-Fi outage is detected in ~60 s
+    // (30 s idle + 3*10 s of unacked probes) and the supervisor can
+    // reconnect.
     int one = 1;
     setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+    int idle = 30;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE,  &idle, sizeof(idle));
+    int intv = 10;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &intv, sizeof(intv));
+    int cnt = 3;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT,   &cnt, sizeof(cnt));
 
     g_sess.sock = s;
     return true;
@@ -165,10 +181,26 @@ int tofu_check_or_record(const char* host, uint16_t port,
 }
 
 void ssh_task(void* /*arg*/) {
+    g_sess.task_alive.store(true);
     uint8_t rxbuf[kRxChunk];
     uint8_t txbuf[kRxChunk];
+    int64_t next_ka_us = esp_timer_get_time();
 
     while (g_sess.running) {
+        // libssh2 doesn't fire keepalives on its own — poke it once a
+        // second and let it decide when to actually send a packet.
+        int64_t now_us = esp_timer_get_time();
+        if (now_us >= next_ka_us) {
+            int seconds_to_next = 0;
+            int kr = libssh2_keepalive_send(g_sess.sess, &seconds_to_next);
+            if (kr != 0 && kr != LIBSSH2_ERROR_EAGAIN) {
+                ESP_LOGW(kTag, "keepalive_send -> %d; treating as dropped", kr);
+                g_sess.running = false;
+                break;
+            }
+            next_ka_us = now_us +
+                (seconds_to_next > 0 ? seconds_to_next : 1) * 1000000LL;
+        }
         // Honour any pending pty resize before the read loop. exchange()
         // hands us a single resize request and clears the slot.
         uint16_t pc = g_sess.pending_cols.exchange(0);
@@ -230,6 +262,7 @@ void ssh_task(void* /*arg*/) {
 
     ESP_LOGI(kTag, "ssh_task exiting");
     shutdown_session();
+    g_sess.task_alive.store(false);
     vTaskDelete(nullptr);
 }
 
@@ -245,6 +278,10 @@ SshConnection::~SshConnection() { stop(); }
 
 bool SshConnection::start(ByteSink rx_sink) {
     const SshConfig& cfg = cfg_;
+    if (g_sess.task_alive.load()) {
+        ESP_LOGD(kTag, "previous task still tearing down — caller should retry");
+        return false;
+    }
     if (g_sess.running) {
         ESP_LOGW(kTag, "already running");
         return false;
@@ -274,6 +311,9 @@ bool SshConnection::start(ByteSink rx_sink) {
         shutdown_session();
         return false;
     }
+
+    // SSH-level keepalive: ask the remote to reply, every 30 s.
+    libssh2_keepalive_config(g_sess.sess, /*want_reply=*/1, 30);
 
     // TOFU host key check.
     uint8_t fp[32];

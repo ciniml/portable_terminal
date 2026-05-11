@@ -32,6 +32,7 @@
 #include "wifi_setup.hpp"
 #endif
 #include "connection.hpp"
+#include "reconnect.hpp"
 #if CONFIG_TAB5_SSH_ENABLED
 #include "ssh_connection.hpp"
 #endif
@@ -237,6 +238,19 @@ extern "C" void app_main(void) {
                      conn->kind(), conn->host_label());
             term_write(line);
             tab5::set_active_connection(conn.get());
+
+            // Supervisor: re-call start() on the same IConnection if the
+            // session drops (Wi-Fi blip, server reboot, idle timeout
+            // hitting TCP keepalive). Replays the current pty size so
+            // the remote starts at the right geometry after reconnect.
+            tab5::start_reconnect_supervisor(
+                conn.get(), remote_rx,
+                [] {
+                    Lock lk;
+                    return std::pair<uint16_t, uint16_t>{
+                        terminal.screen().cols(),
+                        terminal.screen().rows()};
+                });
             // While the remote session is up, bypass the cooked-input
             // filter — the remote echoes / handles BS itself, so doing
             // CR→CRLF / BS-Space-BS locally would double-edit.
