@@ -55,10 +55,16 @@ constexpr int64_t kBlinkPeriodUs = 500 * 1000;
 SemaphoreHandle_t g_mutex = nullptr;
 tab5::CursorRenderer* g_cursor = nullptr;
 
+// Recursive so the same task can re-enter the critical section: e.g.
+// touch_task holds Lock around kbd.handle_touch(), which may invoke
+// the keyboard's sink → usb_sink → make_source_sink, which itself
+// takes Lock. With a non-recursive mutex that path self-deadlocks
+// whenever no remote connection is up (so usb_sink isn't rebound to
+// the lock-free remote_send variant).
 class Lock {
 public:
-    Lock() { xSemaphoreTake(g_mutex, portMAX_DELAY); }
-    ~Lock() { xSemaphoreGive(g_mutex); }
+    Lock() { xSemaphoreTakeRecursive(g_mutex, portMAX_DELAY); }
+    ~Lock() { xSemaphoreGiveRecursive(g_mutex); }
     Lock(const Lock&) = delete;
     Lock& operator=(const Lock&) = delete;
 };
@@ -90,7 +96,7 @@ tab5::ByteSink make_source_sink(TerminalApply&& apply) {
 extern "C" void app_main(void) {
     ESP_LOGI(kTag, "Tab5 terminal — Phase 2 step 3 boot");
 
-    g_mutex = xSemaphoreCreateMutex();
+    g_mutex = xSemaphoreCreateRecursiveMutex();
 
     static tab5::M5GfxDisplay display(kCols, kRows);
     if (!display.init()) {
