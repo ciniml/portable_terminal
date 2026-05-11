@@ -23,8 +23,10 @@
 #include "display_m5gfx.hpp"
 #include "input_touch.hpp"
 #include "input_usb_jtag.hpp"
+#include "menu.hpp"
 #include "soft_keyboard.hpp"
 #include "status_bar.hpp"
+#include "ui_root.hpp"
 #if CONFIG_TAB5_UART_INPUT_ENABLED
 #include "input_uart.hpp"
 #endif
@@ -32,6 +34,7 @@
 #include "wifi_setup.hpp"
 #endif
 #include "connection.hpp"
+#include "profiles.hpp"
 #include "reconnect.hpp"
 #if CONFIG_TAB5_SSH_ENABLED
 #include "ssh_connection.hpp"
@@ -72,6 +75,7 @@ public:
 void on_blink_tick(void* /*arg*/) {
     if (!g_cursor) return;
     Lock lk;
+    if (tab5::ui_root::overlay_active()) return;
     g_cursor->toggle_blink();
 }
 
@@ -174,6 +178,10 @@ extern "C" void app_main(void) {
 
     auto apply = [](std::span<const uint8_t> mapped) {
         // mutex already held by caller (Lock in make_source_sink)
+        if (tab5::ui_root::overlay_active()) {
+            (void)terminal.feed(mapped);
+            return;
+        }
         cursor.erase();
         (void)terminal.feed(mapped);
         (void)terminal.render_dirty();
@@ -185,31 +193,39 @@ extern "C" void app_main(void) {
     tab5::ByteSink uart_sink = make_source_sink(apply);
 #endif
 
-    // Remote connection (SSH preferred, Telnet fallback). The chosen
-    // implementation outlives app_main — held in static storage.
+    // Connection profiles live in NVS; profile 0 is seeded from Kconfig
+    // on a virgin device. Pick the selected one for boot auto-connect.
+    tab5::profiles.init();
+
     static std::unique_ptr<tab5::IConnection> conn;
-    if (tab5::wifi_status().connected) {
+    if (tab5::wifi_status().connected && tab5::profiles.count() > 0) {
+        auto pp = tab5::profiles.get(tab5::profiles.selected());
+
         auto remote_rx = [](std::span<const uint8_t> bytes) {
             Lock lk;
+            if (tab5::ui_root::overlay_active()) {
+                (void)terminal.feed(bytes);
+                return;
+            }
             cursor.erase();
             (void)terminal.feed(bytes);
             (void)terminal.render_dirty();
             cursor.draw();
         };
 
+        if (false) {}
 #if CONFIG_TAB5_SSH_ENABLED
-        {
+        else if (pp && pp->proto == tab5::ConnProto::SSH) {
             char line[160];
             snprintf(line, sizeof(line),
                      "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
-                     CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST,
-                     CONFIG_TAB5_SSH_PORT);
+                     pp->user, pp->host, pp->port);
             term_write(line);
             tab5::SshConfig scfg{
-                .host = CONFIG_TAB5_SSH_HOST,
-                .port = static_cast<uint16_t>(CONFIG_TAB5_SSH_PORT),
-                .user = CONFIG_TAB5_SSH_USER,
-                .password = CONFIG_TAB5_SSH_PASSWORD,
+                .host = pp->host,
+                .port = pp->port,
+                .user = pp->user,
+                .password = pp->password,
                 .cols = kCols,
                 .rows = kRows,
                 .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
@@ -219,15 +235,15 @@ extern "C" void app_main(void) {
         }
 #endif
 #if CONFIG_TAB5_TELNET_ENABLED
-        if (!conn) {
+        else if (pp && pp->proto == tab5::ConnProto::Telnet) {
             char line[160];
             snprintf(line, sizeof(line),
                      "\x1b[2mTelnet: connecting to %s:%d ...\x1b[0m\r\n",
-                     CONFIG_TAB5_TELNET_HOST, CONFIG_TAB5_TELNET_PORT);
+                     pp->host, pp->port);
             term_write(line);
             tab5::TelnetConfig tcfg{
-                .host = CONFIG_TAB5_TELNET_HOST,
-                .port = static_cast<uint16_t>(CONFIG_TAB5_TELNET_PORT),
+                .host = pp->host,
+                .port = pp->port,
                 .cols = kCols,
                 .rows = kRows,
                 .task_stack_bytes = CONFIG_TAB5_TELNET_RX_TASK_STACK,
@@ -267,11 +283,9 @@ extern "C" void app_main(void) {
 #if CONFIG_TAB5_UART_INPUT_ENABLED
             uart_sink = remote_send;
 #endif
-        } else {
-#if CONFIG_TAB5_SSH_ENABLED || CONFIG_TAB5_TELNET_ENABLED
+        } else if (pp) {
             term_write("\x1b[31mRemote connect failed\x1b[0m  "
                        "(falling back to local echo)\r\n");
-#endif
         }
     }
 
@@ -288,11 +302,67 @@ extern "C" void app_main(void) {
     static tab5::SoftKeyboard kbd([&](std::span<const uint8_t> bytes) {
         usb_sink(bytes);
     });
-    // Caller must already hold g_mutex. Called from handle_touch (which the
-    // touch task runs under Lock) and from initial paint below.
-    // Handles the visibility transition: resize the terminal grid (and
-    // the remote pty via SSH WINCH) so cells never sit underneath the
-    // keyboard panel.
+    namespace ui = tab5::ui_root;
+
+    // --- Layer registry ----------------------------------------------
+    // z=10 terminal+cursor (always visible, rows depend on kbd state)
+    ui::register_layer(10, [](const ui::Rect& d) {
+        // Terminal grid is centred at x=160..1120; height tracks the
+        // current screen row count.
+        int term_h = terminal.screen().rows() * 24;
+        ui::Rect tb = {160, 0, 1120, term_h};
+        auto is = ui::intersect(d, tb);
+        if (ui::empty(is)) return;
+        int r0 = std::max(0, is.y0 / 24);
+        int r1 = std::min<int>(terminal.screen().rows(), (is.y1 + 23) / 24);
+        int c0 = std::max(0, (is.x0 - 160) / 12);
+        int c1 = std::min<int>(terminal.screen().cols(),
+                               (is.x1 - 160 + 11) / 12);
+        if (r0 < r1 && c0 < c1) {
+            terminal.screen().mark_region(static_cast<uint16_t>(r0),
+                                          static_cast<uint16_t>(c0),
+                                          static_cast<uint16_t>(r1),
+                                          static_cast<uint16_t>(c1));
+        }
+        cursor.erase();
+        (void)terminal.render_dirty();
+        if (!ui::overlay_active()) cursor.draw();
+    });
+
+    // z=20 right-margin status panel
+    ui::register_layer(20, [](const ui::Rect& d) {
+        ui::Rect sb = {tab5::kStatusPanelX, 0,
+                       tab5::kStatusPanelX + tab5::kStatusPanelW, 720};
+        if (ui::empty(ui::intersect(d, sb))) return;
+        tab5::status_render();
+    });
+
+    // z=30 always-visible left-margin buttons (kbd toggle + Menu)
+    ui::register_layer(30, [](const ui::Rect& d) {
+        auto b = kbd.buttons_rect();
+        ui::Rect br = {b.x0, b.y0, b.x1, b.y1};
+        if (ui::empty(ui::intersect(d, br))) return;
+        kbd.render_buttons();
+    });
+
+    // z=40 kbd panel (only when visible)
+    ui::register_layer(40, [](const ui::Rect& d) {
+        if (!kbd.visible()) return;
+        auto p = kbd.panel_rect();
+        ui::Rect pr = {p.x0, p.y0, p.x1, p.y1};
+        if (ui::empty(ui::intersect(d, pr))) return;
+        kbd.render_panel();
+    });
+
+    // z=100 modal menu (paints full screen when visible)
+    ui::register_layer(100, [](const ui::Rect&) {
+        if (tab5::menu.visible()) tab5::menu.render();
+    });
+
+    // --- Visibility-transition repaints ------------------------------
+    // Soft keyboard show/hide: resize the terminal grid (and the remote
+    // pty via SSH WINCH) so cells stay above the panel; then invalidate
+    // the panel region so the compositor repaints whatever's exposed.
     static auto repaint_kbd = [] {
         uint16_t want_rows = kbd.visible() ? kRowsKbd : kRows;
         if (terminal.screen().rows() != want_rows) {
@@ -301,29 +371,31 @@ extern "C" void app_main(void) {
             if (auto* c = tab5::active_connection()) {
                 c->resize(kCols, want_rows);
             }
-            cursor.erase();
-            (void)terminal.render_dirty();
-            // Clear any gap between the terminal bottom and the keyboard
-            // top (current layout: terminal=14×24=336, keyboard at y=336
-            // — no gap, but tolerate off-by-one).
-            if (kbd.visible()) {
-                int term_h = want_rows * 24;
-                int kbd_top = kbd.panel_rect().y0;
-                if (term_h < kbd_top) {
-                    M5.Display.fillRect(0, term_h, M5.Display.width(),
-                                        kbd_top - term_h, TFT_BLACK);
-                }
-            }
-            cursor.draw();
         }
-        kbd.render();
+        auto p = kbd.panel_rect();
+        ui::invalidate({p.x0, p.y0, p.x1, p.y1});
     };
     kbd.set_repaint(repaint_kbd);
-    // Initial paint of the always-visible toggle.
-    { Lock lk; kbd.render(); }
+
+    // Menu open/close: full-screen invalidate. The overlay_active flag
+    // also gates terminal RX rendering and cursor blink so they don't
+    // bleed through the modal.
+    static auto repaint_menu = [] {
+        ui::set_overlay_active(tab5::menu.visible());
+        ui::invalidate(ui::kFullScreen);
+    };
+    tab5::menu.set_repaint(repaint_menu);
+    kbd.set_on_menu([] { tab5::menu.open(); });
+
+    // Initial paint of every layer in z order.
+    { Lock lk; ui::invalidate(ui::kFullScreen); }
 
     tab5::start_touch_input([](const tab5::TouchPoint& p) {
         Lock lk;
+        if (tab5::menu.visible()) {
+            tab5::menu.handle_touch(p);
+            return;
+        }
         kbd.handle_touch(p);
     });
 

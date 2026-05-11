@@ -30,8 +30,12 @@ public:
     // request a redraw via the caller-installed redraw callback.
     bool handle_touch(const TouchPoint& p);
 
-    // Repaint the panel + toggle button. Caller must hold the UI lock.
+    // Repaint everything (buttons + panel-if-visible). Caller holds UI lock.
     void render();
+    // Granular paints used by the compositor when only part of the
+    // keyboard region is exposed.
+    void render_buttons();
+    void render_panel();
 
     // Mark dirty cells underneath when keyboard is hidden so the
     // terminal can repaint underneath. Returns the rectangular region
@@ -41,6 +45,9 @@ public:
     struct Rect { int x0, y0, x1, y1; };
     Rect panel_rect() const;
     Rect toggle_rect() const;
+    Rect menu_rect() const;
+    // Union of the two always-visible left-margin buttons.
+    Rect buttons_rect() const;
 
     void toggle();
     bool visible() const { return visible_; }
@@ -49,6 +56,11 @@ public:
     // wraps "Lock + render()" with terminal repaint of uncovered area).
     using Repaint = std::function<void()>;
     void set_repaint(Repaint r) { repaint_ = std::move(r); }
+
+    // Called when the user taps the ☰ Menu button. Caller wires this to
+    // open the settings menu overlay.
+    using MenuOpen = std::function<void()>;
+    void set_on_menu(MenuOpen f) { on_menu_ = std::move(f); }
 
 private:
     struct Key {
@@ -79,6 +91,10 @@ private:
     // grid (x>=160) and the keyboard panel (y>=336). Always visible.
     static constexpr int kTglX = 20, kTglY = 20, kTglW = 120, kTglH = 50;
 
+    // ☰ Menu button. Placed below the kbd toggle in the same margin.
+    // Always visible too; tapping invokes the menu open callback.
+    static constexpr int kMenuX = 20, kMenuY = 80, kMenuW = 120, kMenuH = 50;
+
     // Layout: one std::span<const Key> per row, populated at startup.
     void build_layout();
 
@@ -88,11 +104,13 @@ private:
 
     bool hit_panel(int x, int y) const;
     bool hit_toggle(int x, int y) const;
+    bool hit_menu(int x, int y) const;
     int key_at(int x, int y, int* row_out, int* slot_out) const;
     void emit_key(const Key& k);
 
     ByteSink sink_;
     Repaint  repaint_;
+    MenuOpen on_menu_;
     bool visible_ = false;
 
     bool shift_armed_ = false;

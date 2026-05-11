@@ -1,5 +1,18 @@
 menu "Tab5 terminal"
 
+    config TAB5_MAX_PROFILES
+        int "Maximum on-device connection profiles"
+        range 1 16
+        default 4
+        help
+            Profiles are stored in NVS namespace "conn" and edited on
+            the device. Each slot holds one (protocol, host, port,
+            user, auth, password) tuple. On a virgin device profile 0
+            is seeded from the legacy CONFIG_TAB5_SSH_* /
+            CONFIG_TAB5_TELNET_* values; afterwards NVS is the source
+            of truth and those Kconfig values are ignored at runtime.
+
+
     config TAB5_UART_INPUT_ENABLED
         bool "Enable external UART byte-input source"
         default y

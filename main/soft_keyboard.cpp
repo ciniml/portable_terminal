@@ -147,6 +147,19 @@ SoftKeyboard::Rect SoftKeyboard::toggle_rect() const {
     return {kTglX, kTglY, kTglX + kTglW, kTglY + kTglH};
 }
 
+SoftKeyboard::Rect SoftKeyboard::menu_rect() const {
+    return {kMenuX, kMenuY, kMenuX + kMenuW, kMenuY + kMenuH};
+}
+
+SoftKeyboard::Rect SoftKeyboard::buttons_rect() const {
+    return {kTglX, kTglY, kTglX + kTglW, kMenuY + kMenuH};
+}
+
+bool SoftKeyboard::hit_menu(int x, int y) const {
+    return x >= kMenuX && x < kMenuX + kMenuW &&
+           y >= kMenuY && y < kMenuY + kMenuH;
+}
+
 bool SoftKeyboard::hit_panel(int x, int y) const {
     return x >= kPanelX && x < kPanelX + kPanelW &&
            y >= kPanelY && y < kPanelY + kPanelH;
@@ -199,16 +212,25 @@ void SoftKeyboard::draw_toggle() {
     d.setFont(&fonts::lgfxJapanGothic_24);
     d.drawString(visible_ ? "Hide kbd" : "Show kbd",
                  kTglX + kTglW / 2, kTglY + kTglH / 2);
+
+    d.fillRoundRect(kMenuX, kMenuY, kMenuW, kMenuH, 8, kTglBg);
+    d.drawRoundRect(kMenuX, kMenuY, kMenuW, kMenuH, 8, kTglEdge);
+    d.setTextColor(kTglFg, kTglBg);
+    d.drawString("Menu", kMenuX + kMenuW / 2, kMenuY + kMenuH / 2);
 }
 
-void SoftKeyboard::render() {
-    using Kind = Key::Kind;
+void SoftKeyboard::render_buttons() {
     draw_toggle();
-    if (!visible_) return;
+    auto& d = M5.Display;
+    d.setFont(&fonts::lgfxJapanGothic_24);
+    d.setTextDatum(top_left);
+}
 
+void SoftKeyboard::render_panel() {
+    using Kind = Key::Kind;
+    if (!visible_) return;
     auto& d = M5.Display;
     d.fillRect(kPanelX, kPanelY, kPanelW, kPanelH, kBgColor);
-
     for (int row = 0; row < kRows; ++row) {
         int slot = 0;
         while (slot < kSlots) {
@@ -222,9 +244,13 @@ void SoftKeyboard::render() {
             slot += k.width;
         }
     }
-    // Reset font so the rest of the app's drawing isn't affected.
     d.setFont(&fonts::lgfxJapanGothic_24);
     d.setTextDatum(top_left);
+}
+
+void SoftKeyboard::render() {
+    render_buttons();
+    render_panel();
 }
 
 // ----- byte emission -----
@@ -326,6 +352,12 @@ bool SoftKeyboard::handle_touch(const TouchPoint& p) {
         if (p.event == TouchEvent::Up) toggle();
         return true;
     }
+    // ☰ Menu button — only acts on touch Up so a stray Down then drag
+    // away doesn't fire.
+    if (hit_menu(p.x, p.y)) {
+        if (p.event == TouchEvent::Up && on_menu_) on_menu_();
+        return true;
+    }
 
     if (!visible_) return false;
     if (!hit_panel(p.x, p.y)) return false;
@@ -334,17 +366,19 @@ bool SoftKeyboard::handle_touch(const TouchPoint& p) {
     if (key_at(p.x, p.y, &row, &slot) < 0) return true;
     const Key& k = rows_[row][slot];
 
+    // Press-highlight changes only repaint the panel itself — calling
+    // the general repaint_ callback here would trigger the compositor's
+    // full panel-rect invalidate on every Down/Move/Up.
     if (p.event == TouchEvent::Down) {
         pressed_row_  = row;
         pressed_slot_ = slot;
-        if (repaint_) repaint_();
+        render_panel();
         return true;
     }
     if (p.event == TouchEvent::Move) {
-        // Cancel highlight if finger leaves the pressed key.
         if (pressed_row_ != row || pressed_slot_ != slot) {
             pressed_row_ = pressed_slot_ = -1;
-            if (repaint_) repaint_();
+            render_panel();
         }
         return true;
     }
@@ -352,7 +386,7 @@ bool SoftKeyboard::handle_touch(const TouchPoint& p) {
         bool same = (pressed_row_ == row && pressed_slot_ == slot);
         pressed_row_ = pressed_slot_ = -1;
         if (same) emit_key(k);
-        if (repaint_) repaint_();
+        render_panel();
         return true;
     }
     return true;

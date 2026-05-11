@@ -16,4 +16,13 @@ using StatusLock = std::function<void(std::function<void()>)>;
 // Safe to call once during boot.
 void start_status_bar(StatusLock lock);
 
+// Repaint the status panel right now. Caller must hold the UI lock.
+// Used by the compositor when something exposes the right margin
+// outside of the periodic 5 s refresh.
+void status_render();
+
+// Pixel bounds of the status panel — used by the UI compositor.
+constexpr int kStatusPanelX = 1120;
+constexpr int kStatusPanelW = 160;
+
 }  // namespace tab5

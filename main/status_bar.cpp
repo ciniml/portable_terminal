@@ -37,7 +37,17 @@ constexpr uint16_t kBatLowColor  = 0xFD20;  // amber
 constexpr uint16_t kBatCritColor = 0xF800;
 constexpr uint16_t kSeparator    = 0x4208;
 
-void render_locked() {
+// Exported synchronous render for the UI compositor. Caller already
+// holds the lock.
+void status_render_impl();
+
+}  // namespace
+
+void status_render() { status_render_impl(); }
+
+namespace {
+
+void status_render_impl() {
     auto& d = M5.Display;
     d.fillRect(kPanelX, kPanelY, kPanelW, kPanelH, kBgColor);
     d.drawFastVLine(kPanelX, 0, kPanelH, kSeparator);
@@ -155,9 +165,9 @@ StatusLock g_lock;
 void status_task(void*) {
     for (;;) {
         if (g_lock) {
-            g_lock([] { render_locked(); });
+            g_lock([] { status_render_impl(); });
         } else {
-            render_locked();
+            status_render_impl();
         }
         vTaskDelay(pdMS_TO_TICKS(kRefreshMs));
     }

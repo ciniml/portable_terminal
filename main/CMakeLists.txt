@@ -23,13 +23,16 @@ idf_component_register(
         "input_usb_jtag.cpp"
         "input_uart.cpp"
         "input_touch.cpp"
+        "menu.cpp"
         "soft_keyboard.cpp"
         "wifi_setup.cpp"
         "connection.cpp"
+        "profiles.cpp"
         "reconnect.cpp"
         "ssh_connection.cpp"
         "telnet_connection.cpp"
         "status_bar.cpp"
+        "ui_root.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core
