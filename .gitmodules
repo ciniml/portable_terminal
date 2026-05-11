@@ -8,5 +8,5 @@
 	branch = idf6-tab5-patches
 [submodule "components/libssh2/libssh2"]
 	path = components/libssh2/libssh2
-	url = https://github.com/libssh2/libssh2.git
-	branch = libssh2-1.11.1
+	url = https://github.com/ciniml/libssh2.git
+	branch = idf6-tab5-patches

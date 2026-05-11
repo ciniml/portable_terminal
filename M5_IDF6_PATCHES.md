@@ -134,12 +134,32 @@ REQUIRES, so the slave build dies before producing
 `network_adapter.bin`. We don't use cmd_system, so the dep is just
 deleted.
 
-## libssh2 1.11.1
+## libssh2 1.11.1 — fork at ciniml/libssh2 branch idf6-tab5-patches
 
-Vendored as a git submodule at `components/libssh2/libssh2`. No
-source patches needed — 1.11.1 already covers mbedTLS 3.x via
-`MBEDTLS_VERSION_NUMBER >= 0x03000000` guards (`MBEDTLS_PRIVATE`,
-opaque RSA/ECP fields, etc.).
+The submodule at `components/libssh2/libssh2` points at
+[ciniml/libssh2 @ idf6-tab5-patches](https://github.com/ciniml/libssh2/tree/idf6-tab5-patches),
+a fork of [libssh2/libssh2](https://github.com/libssh2/libssh2)
+at the `libssh2-1.11.1` tag with two mbedTLS-backend fixes layered
+on top:
+
+- **`mbedtls: initialise ret in _libssh2_mbedtls_pub_priv_key`** —
+  `int ret;` was uninitialised; on the happy path the subsequent
+  `if(ret)` read a stack-leftover non-zero value, returning -1
+  without `_libssh2_error`. Surfaces in user code as a silent
+  rc=-1 from `libssh2_userauth_publickey_frommemory` with
+  session_last_error=0.
+- **`mbedtls: fix gen_publickey_from_rsa wire format`** — pointer
+  `p` was not advanced past the binary writes of e and n, and the
+  SSH mpint leading-zero pad (required when the MSB bit is set —
+  always true for an RSA-2048 modulus) was missing. Resulting
+  blob is malformed; sshd rejects it with `userauth_pubkey: parse
+  key: invalid format`. Factored into a `write_mpi_ssh` helper.
+
+Both are upstream bugs in the mbedTLS backend of libssh2 1.11.1.
+Together they made `libssh2_userauth_publickey_frommemory`
+non-functional on the mbedTLS backend; password auth was
+unaffected. To re-sync upstream, rebase the patch branch onto a
+newer tag.
 
 The component build (`components/libssh2/CMakeLists.txt` +
 `libssh2_config.h`) is ours:
