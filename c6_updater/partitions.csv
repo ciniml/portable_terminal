@@ -1,0 +1,7 @@
+# One-shot updater — minimal partition layout. The new 2.x C6 slave is
+# embedded into the app image via EMBED_FILES, no separate slave_fw
+# partition needed.
+# Name,    Type, SubType, Offset,   Size,
+nvs,       data, nvs,     0x9000,   0x4000,
+phy_init,  data, phy,     0xf000,   0x1000,
+factory,   app,  factory, 0x10000,  0x300000,

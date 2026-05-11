@@ -1,0 +1,11 @@
+## One-shot updater. esp_hosted 1.4.x speaks the same protocol the
+## factory C6 slave (V1.4.1) speaks; pinning to that line keeps the
+## link layer compatible. Once the OTA push succeeds the C6 runs the
+## newer 2.x slave bundled by the parent project.
+dependencies:
+  idf: '>=5.4,<6.0'
+  # 1.4.7 has a stale REQUIRES list (missing esp_driver_sdmmc) which
+  # makes it fail to build on stock IDF 5.4.x. M5Tab5-UserDemo pins to
+  # 1.4.0 which builds cleanly — use the exact same version here.
+  espressif/esp_hosted: '==1.4.0'
+  espressif/esp_wifi_remote: '*'
