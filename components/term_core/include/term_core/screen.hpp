@@ -51,6 +51,14 @@ public:
 
     void reset();
 
+    // Change the grid dimensions. Cells in the surviving rectangle keep
+    // their contents; new cells are initialised to the default Cell. The
+    // cursor, scroll region, and saved DECSC state are clamped to the new
+    // bounds. Alt-screen backup is kept consistent at the new size — its
+    // contents are discarded since dimensions differ.
+    // Marks the full new grid dirty.
+    void resize(uint16_t cols, uint16_t rows);
+
     // IParserSink:
     void put_char(char32_t ch) override;
     void execute(uint8_t c0) override;

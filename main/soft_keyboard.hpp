@@ -1,9 +1,10 @@
 // On-screen software keyboard for the Tab5 GT911 touch panel.
 //
-// Layout: a 1120 px wide × 320 px tall panel that overlays the bottom of
-// the LCD when shown. Five rows × fourteen 80-px slots, plus a persistent
-// toggle button in the left margin so it can be opened/closed without
-// having to type. Modifier keys (Shift / Ctrl / Alt) are sticky one-shot.
+// Layout: a 1120 px wide × 384 px tall panel that overlays the bottom of
+// the LCD when shown. Six rows × fourteen 80-px slots: F-keys / nav row,
+// number row, two alpha rows, shift+arrows+ins/del, modifier+space row.
+// A persistent toggle button in the left margin opens / closes the panel
+// without typing. Modifier keys (Shift / Ctrl / Alt) are sticky one-shot.
 //
 // All bytes go out through a caller-supplied ByteSink. Rendering is
 // passive — call render() under the global UI lock from app_main; the
@@ -57,22 +58,26 @@ private:
         enum class Kind : uint8_t {
             Char, Esc, Tab, Enter, Backspace, Space,
             Up, Down, Left, Right,
+            Home, End, PageUp, PageDown, Insert, Delete,
+            F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12,
             Shift, Ctrl, Alt, Hide,
         } kind = Kind::Char;
         uint8_t width = 1;  // in slot units
     };
 
-    static constexpr int kRows  = 5;
+    static constexpr int kRows  = 6;
     static constexpr int kSlots = 14;
 
     // Geometry
     static constexpr int kPanelX = 0;
-    static constexpr int kPanelY = 400;
+    static constexpr int kPanelY = 336;
     static constexpr int kPanelW = 1120;
-    static constexpr int kPanelH = 320;
+    static constexpr int kPanelH = 384;
     static constexpr int kSlotW  = kPanelW / kSlots;   // 80
     static constexpr int kRowH   = kPanelH / kRows;    // 64
-    static constexpr int kTglX = 20, kTglY = 660, kTglW = 120, kTglH = 50;
+    // Toggle button lives in the left margin, away from both the terminal
+    // grid (x>=160) and the keyboard panel (y>=336). Always visible.
+    static constexpr int kTglX = 20, kTglY = 20, kTglW = 120, kTglH = 50;
 
     // Layout: one std::span<const Key> per row, populated at startup.
     void build_layout();

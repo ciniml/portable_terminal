@@ -64,6 +64,54 @@ DamageRect Screen::take_damage() {
     return r;
 }
 
+void Screen::resize(uint16_t new_cols, uint16_t new_rows) {
+    if (new_cols == 0 || new_rows == 0) return;
+    if (new_cols == cols_ && new_rows == rows_) return;
+
+    std::vector<Cell> new_grid(static_cast<size_t>(new_cols) * new_rows);
+    uint16_t copy_rows = std::min(rows_, new_rows);
+    uint16_t copy_cols = std::min(cols_, new_cols);
+    for (uint16_t r = 0; r < copy_rows; ++r) {
+        for (uint16_t c = 0; c < copy_cols; ++c) {
+            new_grid[static_cast<size_t>(r) * new_cols + c] =
+                grid_[static_cast<size_t>(r) * cols_ + c];
+        }
+    }
+    grid_ = std::move(new_grid);
+
+    cols_ = new_cols;
+    rows_ = new_rows;
+
+    // Clamp cursor.
+    if (cursor_row_ >= rows_) cursor_row_ = rows_ - 1;
+    if (cursor_col_ >= cols_) cursor_col_ = cols_ - 1;
+    wrap_pending_ = false;
+
+    // Reset scroll region to full screen (most apps expect this on WINCH).
+    scroll_top_ = 0;
+    scroll_bot_ = rows_;
+
+    // Clamp saved cursor.
+    if (has_saved_) {
+        if (saved_row_ >= rows_) saved_row_ = rows_ - 1;
+        if (saved_col_ >= cols_) saved_col_ = cols_ - 1;
+    }
+
+    // Reset alt-screen backup at the new size — keeping the contents
+    // around would require row/col-aware copy logic that isn't worth it
+    // here. Apps that switch screens after a resize will redraw anyway.
+    backup_.grid.assign(static_cast<size_t>(cols_) * rows_, Cell{});
+    backup_.cursor_row = 0;
+    backup_.cursor_col = 0;
+    backup_.wrap_pending = false;
+    backup_.scroll_top = 0;
+    backup_.scroll_bot = rows_;
+    backup_.has_saved = false;
+
+    damage_ = {};
+    mark_rect(0, 0, rows_, cols_);
+}
+
 void Screen::reset() {
     std::fill(grid_.begin(), grid_.end(), Cell{});
     cursor_row_ = 0;

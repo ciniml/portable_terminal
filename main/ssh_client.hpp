@@ -38,6 +38,11 @@ public:
     // buffer is full or the session has gone away.
     void send(std::span<const uint8_t> bytes);
 
+    // Request a remote pty resize (WINCH). Latches the requested size;
+    // ssh_task picks it up and calls libssh2_channel_request_pty_size on
+    // its next poll. No-op if not connected.
+    void resize_pty(uint16_t cols, uint16_t rows);
+
     bool is_connected() const;
 };
 

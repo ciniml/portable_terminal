@@ -11,6 +11,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "M5Unified.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -40,6 +41,10 @@ namespace {
 constexpr const char* kTag = "tab5_term";
 constexpr uint16_t kCols = 80;
 constexpr uint16_t kRows = 30;
+// When the soft keyboard is visible it consumes the bottom of the LCD;
+// shrink the terminal grid so all cells stay above it. The panel is at
+// y=336..720, so 14 rows × 24 px = 336 px terminal fits exactly above.
+constexpr uint16_t kRowsKbd = 14;
 constexpr int64_t kBlinkPeriodUs = 500 * 1000;
 
 SemaphoreHandle_t g_mutex = nullptr;
@@ -235,20 +240,30 @@ extern "C" void app_main(void) {
     });
     // Caller must already hold g_mutex. Called from handle_touch (which the
     // touch task runs under Lock) and from initial paint below.
+    // Handles the visibility transition: resize the terminal grid (and
+    // the remote pty via SSH WINCH) so cells never sit underneath the
+    // keyboard panel.
     static auto repaint_kbd = [] {
-        if (!kbd.visible()) {
-            // Mark the terminal rows previously covered by the panel
-            // dirty so they render through underneath.
-            auto r = kbd.panel_rect();
-            int r0 = r.y0 / 24;
-            int r1 = (r.y1 + 23) / 24;
-            if (r0 < 0) r0 = 0;
-            if (r1 > kRows) r1 = kRows;
-            terminal.screen().mark_region(static_cast<uint16_t>(r0), 0,
-                                          static_cast<uint16_t>(r1),
-                                          terminal.screen().cols());
+        uint16_t want_rows = kbd.visible() ? kRowsKbd : kRows;
+        if (terminal.screen().rows() != want_rows) {
+            terminal.resize(kCols, want_rows);
+            display.set_grid_size(kCols, want_rows);
+#if CONFIG_TAB5_SSH_ENABLED
+            tab5::ssh_client.resize_pty(kCols, want_rows);
+#endif
             cursor.erase();
             (void)terminal.render_dirty();
+            // Clear any gap between the terminal bottom and the keyboard
+            // top (current layout: terminal=14×24=336, keyboard at y=336
+            // — no gap, but tolerate off-by-one).
+            if (kbd.visible()) {
+                int term_h = want_rows * 24;
+                int kbd_top = kbd.panel_rect().y0;
+                if (term_h < kbd_top) {
+                    M5.Display.fillRect(0, term_h, M5.Display.width(),
+                                        kbd_top - term_h, TFT_BLACK);
+                }
+            }
             cursor.draw();
         }
         kbd.render();

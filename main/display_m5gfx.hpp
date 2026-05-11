@@ -25,6 +25,13 @@ public:
     term::Result<void> flush(term::DamageRect r) override;
     void bell() override;
 
+    // Track a new logical grid size from outside (e.g. after a soft-
+    // keyboard show/hide that shrinks the terminal). Updates cols_/rows_
+    // and the horizontal origin so columns stay centred. Vertical origin
+    // is anchored at the top so the keyboard panel below is unaffected.
+    // Caller is expected to follow up by re-rendering damaged cells.
+    void set_grid_size(uint16_t cols, uint16_t rows);
+
 private:
     uint16_t cols_;
     uint16_t rows_;

@@ -26,6 +26,11 @@ public:
     const Screen& screen() const { return screen_; }
     Screen& screen() { return screen_; }
 
+    // Change the grid dimensions. Forwards to Screen::resize. The caller
+    // is responsible for notifying the display backend (so it can update
+    // its own cached geometry) and the remote pty (SIGWINCH).
+    void resize(uint16_t cols, uint16_t rows) { screen_.resize(cols, rows); }
+
 private:
     Screen screen_;
     Parser parser_;

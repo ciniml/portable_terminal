@@ -37,6 +37,10 @@ struct Session {
     SshRxApply rx_apply;
     std::atomic<bool> running{false};
     char banner[96] = {0};
+    // Pending pty resize. Producer: any thread via SshClient::resize_pty.
+    // Consumer: ssh_task on its next poll. cols==0 means "no pending".
+    std::atomic<uint16_t> pending_cols{0};
+    std::atomic<uint16_t> pending_rows{0};
 };
 
 Session g_sess;
@@ -165,6 +169,16 @@ void ssh_task(void* /*arg*/) {
     uint8_t txbuf[kRxChunk];
 
     while (g_sess.running) {
+        // Honour any pending pty resize before the read loop. exchange()
+        // hands us a single resize request and clears the slot.
+        uint16_t pc = g_sess.pending_cols.exchange(0);
+        if (pc != 0) {
+            uint16_t pr = g_sess.pending_rows.load();
+            int rc = libssh2_channel_request_pty_size(g_sess.chan, pc, pr);
+            if (rc != 0) {
+                ESP_LOGW(kTag, "pty_size(%u,%u) -> %d", pc, pr, rc);
+            }
+        }
         // Drain RX until EAGAIN / EOF.
         for (;;) {
             ssize_t n = libssh2_channel_read(g_sess.chan,
@@ -342,6 +356,14 @@ bool SshClient::start(const SshConfig& cfg, SshRxApply rx_apply) {
 void SshClient::send(std::span<const uint8_t> bytes) {
     if (!g_sess.running || !g_sess.tx) return;
     xStreamBufferSend(g_sess.tx, bytes.data(), bytes.size(), 0);
+}
+
+void SshClient::resize_pty(uint16_t cols, uint16_t rows) {
+    if (!g_sess.running || cols == 0 || rows == 0) return;
+    // Rows first so the consumer's exchange(cols=0) check never sees a
+    // half-published pair.
+    g_sess.pending_rows.store(rows);
+    g_sess.pending_cols.store(cols);
 }
 
 bool SshClient::is_connected() const {

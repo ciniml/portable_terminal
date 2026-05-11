@@ -96,11 +96,12 @@ term::Result<void> M5GfxDisplay::init() {
     cell_h_ = kCellH;
 
     uint16_t needed_w = uint32_t(cell_w_) * cols_;
-    uint16_t needed_h = uint32_t(cell_h_) * rows_;
     uint16_t screen_w = M5.Display.width();
-    uint16_t screen_h = M5.Display.height();
     origin_x_ = (screen_w > needed_w) ? (screen_w - needed_w) / 2 : 0;
-    origin_y_ = (screen_h > needed_h) ? (screen_h - needed_h) / 2 : 0;
+    // Anchor at the top: the soft keyboard, when shown, occupies the
+    // bottom of the LCD and would otherwise overlap a vertically-centred
+    // terminal grid.
+    origin_y_ = 0;
     return {};
 }
 
@@ -153,6 +154,15 @@ term::Result<void> M5GfxDisplay::draw_cells(uint16_t row, uint16_t col,
 
 term::Result<void> M5GfxDisplay::flush(term::DamageRect) {
     return {};  // immediate-mode rendering
+}
+
+void M5GfxDisplay::set_grid_size(uint16_t cols, uint16_t rows) {
+    cols_ = cols;
+    rows_ = rows;
+    uint16_t needed_w = uint32_t(cell_w_) * cols_;
+    uint16_t screen_w = M5.Display.width();
+    origin_x_ = (screen_w > needed_w) ? (screen_w - needed_w) / 2 : 0;
+    origin_y_ = 0;
 }
 
 void M5GfxDisplay::bell() {
