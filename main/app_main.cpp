@@ -27,6 +27,9 @@
 #if CONFIG_TAB5_WIFI_ENABLED
 #include "wifi_setup.hpp"
 #endif
+#if CONFIG_TAB5_SSH_ENABLED
+#include "ssh_client.hpp"
+#endif
 #include "term_core/terminal.hpp"
 
 namespace {
@@ -158,7 +161,63 @@ extern "C" void app_main(void) {
         cursor.draw();
     };
 
-    if (auto rc = tab5::start_usb_jtag_input(make_source_sink(apply)); !rc) {
+    tab5::ByteSink usb_sink = make_source_sink(apply);
+#if CONFIG_TAB5_UART_INPUT_ENABLED
+    tab5::ByteSink uart_sink = make_source_sink(apply);
+#endif
+
+#if CONFIG_TAB5_SSH_ENABLED
+    if (tab5::wifi_status().connected) {
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
+                 CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST,
+                 CONFIG_TAB5_SSH_PORT);
+        term_write(line);
+
+        // ssh_task posts RX into the terminal under g_mutex, then renders.
+        auto ssh_rx = [](std::span<const uint8_t> bytes) {
+            Lock lk;
+            cursor.erase();
+            (void)terminal.feed(bytes);
+            (void)terminal.render_dirty();
+            cursor.draw();
+        };
+
+        tab5::SshConfig scfg{
+            .host = CONFIG_TAB5_SSH_HOST,
+            .port = static_cast<uint16_t>(CONFIG_TAB5_SSH_PORT),
+            .user = CONFIG_TAB5_SSH_USER,
+            .password = CONFIG_TAB5_SSH_PASSWORD,
+            .cols = kCols,
+            .rows = kRows,
+            .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
+        };
+
+        if (tab5::ssh_client.start(scfg, ssh_rx)) {
+            snprintf(line, sizeof(line),
+                     "\x1b[32mSSH connected\x1b[0m  %s@%s\r\n",
+                     CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST);
+            term_write(line);
+            // While SSH is up, bypass the cooked-input filter — SSH expects
+            // raw bytes and the remote side echoes / handles BS itself, so
+            // running CR→CRLF / BS-Space-BS locally would double-edit.
+            usb_sink = [](std::span<const uint8_t> bytes) {
+                tab5::ssh_client.send(bytes);
+            };
+#if CONFIG_TAB5_UART_INPUT_ENABLED
+            uart_sink = [](std::span<const uint8_t> bytes) {
+                tab5::ssh_client.send(bytes);
+            };
+#endif
+        } else {
+            term_write("\x1b[31mSSH connect failed\x1b[0m  "
+                       "(falling back to local echo)\r\n");
+        }
+    }
+#endif
+
+    if (auto rc = tab5::start_usb_jtag_input(usb_sink); !rc) {
         ESP_LOGE(kTag, "USB-JTAG input start failed");
     }
 
@@ -169,8 +228,7 @@ extern "C" void app_main(void) {
         .rx_gpio = CONFIG_TAB5_UART_INPUT_RX_GPIO,
         .baud = CONFIG_TAB5_UART_INPUT_BAUD,
     };
-    if (auto rc = tab5::start_uart_input(uart_cfg, make_source_sink(apply));
-        !rc) {
+    if (auto rc = tab5::start_uart_input(uart_cfg, uart_sink); !rc) {
         ESP_LOGE(kTag, "UART input start failed");
     }
 #endif

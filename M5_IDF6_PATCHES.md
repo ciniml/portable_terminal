@@ -133,3 +133,27 @@ dependency — IDF 6.0's `cmd_system_sleep.c` calls
 REQUIRES, so the slave build dies before producing
 `network_adapter.bin`. We don't use cmd_system, so the dep is just
 deleted.
+
+## libssh2 1.11.1
+
+Vendored as a git submodule at `components/libssh2/libssh2`. No
+source patches needed — 1.11.1 already covers mbedTLS 3.x via
+`MBEDTLS_VERSION_NUMBER >= 0x03000000` guards (`MBEDTLS_PRIVATE`,
+opaque RSA/ECP fields, etc.).
+
+The component build (`components/libssh2/CMakeLists.txt` +
+`libssh2_config.h`) is ours:
+
+- `LIBSSH2_MBEDTLS=1`, `HAVE_CONFIG_H=1` on the command line; the
+  hand-rolled `libssh2_config.h` enables the POSIX headers newlib
+  provides (`unistd.h`, `sys/socket.h`, `arpa/inet.h`, etc.).
+- `LIBSSH2_HAVE_ZLIB` is **left undefined** (not `=0`) because
+  `src/comp.c` checks it with `#ifdef`, not `#if`. Defining it to
+  zero would still pull in `<zlib.h>`.
+- `openssl.c`, `libgcrypt.c`, `wincng.c`, `os400qc3.c`, and
+  `agent_win.c` are excluded from the source glob — the mbedTLS
+  backend plus POSIX agent.c are all we need.
+- A handful of `-Wno-...` (`unused-but-set-variable`,
+  `stringop-truncation`, `format-truncation`) silence warnings
+  libssh2 throws under IDF's strict flags rather than patching the
+  source.

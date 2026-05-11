@@ -58,6 +58,7 @@ main/                          Target entry: app_main, M5GFX-backed IDisplay
 components/term_core/          HW-independent VT100 core (IDF + host dual build)
 components/M5GFX/              git submodule — vendored M5GFX, patched for IDF 6.0
 components/M5Unified/          git submodule — vendored M5Unified, patched for IDF 6.0
+components/libssh2/            libssh2 1.11.1 submodule + custom CMakeLists (mbedTLS)
 components/wireguard/          From serial_wifi_logger (unused in Phase 1)
 components/tailscale/          From serial_wifi_logger (unused in Phase 1)
 components/usb_host_ftdi_sio/  From serial_wifi_logger (unused in Phase 1)
@@ -74,8 +75,8 @@ M5Unified / M5GFX (Tab5 LCD). In host tests,
 
 ## Submodules
 
-`components/M5GFX` and `components/M5Unified` are git submodules. After
-`git clone`, run:
+`components/M5GFX`, `components/M5Unified`, and `components/libssh2/libssh2`
+are git submodules. After `git clone`, run:
 
 ```bash
 git submodule update --init --recursive
@@ -130,6 +131,30 @@ Configure SSID / PSK via `idf.py menuconfig` → "Tab5 terminal" → "Wi-Fi".
 Wi-Fi is gated on `CONFIG_TAB5_WIFI_ENABLED` (default off) so a fresh
 clone still builds and runs without a configured network or a re-flashed
 C6.
+
+## SSH client
+
+When `CONFIG_TAB5_SSH_ENABLED=y` and Wi-Fi has come up, `app_main` opens
+an interactive shell session to the configured server and routes
+locally-typed bytes (USB-JTAG + UART) to it. The implementation lives in
+[main/ssh_client.{hpp,cpp}](main/ssh_client.cpp) and uses libssh2 1.11.1
+with the mbedTLS backend (`LIBSSH2_MBEDTLS=1`). MVP scope: password
+auth, single session, no reconnect. Configure host / port / user /
+password via `idf.py menuconfig` → "Tab5 terminal" → "SSH" or in
+`sdkconfig.defaults.local`.
+
+While SSH is up, the input sinks bypass the `CookedInputFilter` —
+SSH expects raw keystrokes and the remote shell handles CR/BS itself.
+If `ssh_client.start()` fails, sinks fall back to the local-echo
+terminal so the device stays usable as a status display.
+
+**Host-key verification: TOFU (Trust On First Use).** First connect to
+a given host:port records SHA-256 of `libssh2_session_hostkey()` in NVS
+namespace `"ssh_tofu"` (key is the 32-bit FNV-1a hash of "host:port",
+hex-encoded — NVS key length limit is 15 chars). Subsequent connects
+require an exact match or the session is refused. To re-trust a host
+(e.g. after a server rekey), `idf.py erase-flash` clears all
+fingerprints; selectively rotating one entry isn't exposed yet.
 
 ## Reusable components
 

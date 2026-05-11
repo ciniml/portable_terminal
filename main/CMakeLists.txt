@@ -7,6 +7,7 @@ idf_component_register(
         "input_usb_jtag.cpp"
         "input_uart.cpp"
         "wifi_setup.cpp"
+        "ssh_client.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core
@@ -19,6 +20,9 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        libssh2
+        mbedtls
+        lwip
         # carried for later phases (unused yet):
         wireguard
         tailscale

@@ -65,4 +65,50 @@ menu "Tab5 terminal"
 
     endmenu
 
+    menu "SSH"
+
+        config TAB5_SSH_ENABLED
+            bool "Enable SSH client"
+            default n
+            depends on TAB5_WIFI_ENABLED
+            help
+                When enabled and Wi-Fi has come up, the app opens an
+                SSH shell session to the configured server, renders
+                the remote pty on the LCD, and forwards locally-typed
+                bytes (USB-Serial-JTAG + UART) to the remote.
+
+        config TAB5_SSH_HOST
+            string "Server host"
+            depends on TAB5_SSH_ENABLED
+            default ""
+            help
+                Hostname or dotted-quad IPv4 address.
+
+        config TAB5_SSH_PORT
+            int "Server port"
+            depends on TAB5_SSH_ENABLED
+            default 22
+            range 1 65535
+
+        config TAB5_SSH_USER
+            string "Username"
+            depends on TAB5_SSH_ENABLED
+            default ""
+
+        config TAB5_SSH_PASSWORD
+            string "Password"
+            depends on TAB5_SSH_ENABLED
+            default ""
+            help
+                Password for password authentication. MVP only; public-key
+                auth is out of scope.
+
+        config TAB5_SSH_RX_TASK_STACK
+            int "ssh_task stack size (bytes)"
+            depends on TAB5_SSH_ENABLED
+            default 8192
+            range 4096 32768
+
+    endmenu
+
 endmenu
