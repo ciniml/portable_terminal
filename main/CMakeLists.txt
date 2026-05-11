@@ -6,8 +6,10 @@ idf_component_register(
         "display_m5gfx.cpp"
         "input_usb_jtag.cpp"
         "input_uart.cpp"
+        "input_touch.cpp"
         "wifi_setup.cpp"
         "ssh_client.cpp"
+        "status_bar.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core

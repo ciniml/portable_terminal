@@ -530,7 +530,7 @@ void Screen::put_char(char32_t ch) {
 
 void Screen::execute(uint8_t c0) {
     switch (c0) {
-        case 0x07: break;  // BEL
+        case 0x07: bell_pending_ = true; break;  // BEL
         case 0x08: backspace(); break;
         case 0x09: tab(); break;
         case 0x0A:

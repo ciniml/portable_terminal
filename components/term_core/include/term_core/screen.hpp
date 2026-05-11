@@ -33,6 +33,15 @@ public:
     DamageRect take_damage();
     bool dirty() const { return !damage_.empty(); }
 
+    // BEL (0x07) counter. Incremented by execute(); cleared by
+    // take_bell_pending(). Caller is expected to ring once per drain
+    // regardless of how many BELs accumulated.
+    bool take_bell_pending() {
+        bool b = bell_pending_;
+        bell_pending_ = false;
+        return b;
+    }
+
     void reset();
 
     // IParserSink:
@@ -116,6 +125,7 @@ private:
     Color cur_bg_{Color::default_color()};
 
     DamageRect damage_{};
+    bool bell_pending_{false};
 
     // Alt-screen support (DECSET ?1049 / ?1047 / ?47). Holds whichever
     // screen is currently inactive — swapped wholesale on transition.

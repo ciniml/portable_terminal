@@ -24,6 +24,7 @@ Result<void> Terminal::feed(std::string_view s) {
 
 Result<void> Terminal::render_dirty() {
     if (!display_) return std::unexpected(Error::NotInitialized);
+    if (screen_.take_bell_pending()) display_->bell();
     DamageRect r = screen_.take_damage();
     if (r.empty()) return {};
 

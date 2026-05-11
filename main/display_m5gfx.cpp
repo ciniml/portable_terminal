@@ -155,4 +155,11 @@ term::Result<void> M5GfxDisplay::flush(term::DamageRect) {
     return {};  // immediate-mode rendering
 }
 
+void M5GfxDisplay::bell() {
+    // Tab5 routes audio through an I2S codec. M5Unified's Speaker_Class
+    // compiles under our IDF 6 shim; the runtime path is best-effort.
+    // Short, mid-frequency tone — about as terminal-bell-ish as it gets.
+    M5.Speaker.tone(880.0f, 60);
+}
+
 }  // namespace tab5

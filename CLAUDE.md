@@ -156,6 +156,23 @@ require an exact match or the session is refused. To re-trust a host
 (e.g. after a server rekey), `idf.py erase-flash` clears all
 fingerprints; selectively rotating one entry isn't exposed yet.
 
+## On-device peripherals
+
+- **Status panel** ([main/status_bar.cpp](main/status_bar.cpp)) — renders into
+  the 160 px right margin (terminal grid is 80×30 × 12×24 = 960×720 on a
+  1280×720 screen, so margin space is free). Shows battery %, charging,
+  Wi-Fi IP, SSH state, uptime. Refresh every 5 s through the caller-supplied
+  lock callback so all M5GFX access stays serialised with the terminal.
+- **Buzzer** — BEL (0x07) is wired through `IDisplay::bell()` (default no-op
+  on the host fake); [display_m5gfx.cpp](main/display_m5gfx.cpp) implements
+  it via `M5.Speaker.tone(880, 60)`. Audio path goes through M5Unified's
+  I2S codec wrapper — see [M5_IDF6_PATCHES.md](M5_IDF6_PATCHES.md) for the
+  IDF 6 audio status (compiles, runtime best-effort).
+- **Touch input** ([main/input_touch.cpp](main/input_touch.cpp)) — a 60 Hz
+  polling task drives `M5.update()` and emits `Down/Move/Up` edge events
+  to a `TouchSink`. GT911 panel via M5GFX. The events go to ESP_LOGI for
+  now; a soft-keyboard UI on top is a follow-up.
+
 ## Reusable components
 
 `wireguard`, `tailscale`, and `usb_host_ftdi_sio` are vendored from

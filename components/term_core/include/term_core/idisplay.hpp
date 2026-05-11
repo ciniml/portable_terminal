@@ -30,6 +30,10 @@ public:
                                     std::span<const Cell> cells) = 0;
 
     virtual Result<void> flush(DamageRect r) = 0;
+
+    // Audible/visual bell (BEL, 0x07). Default no-op so backends that
+    // can't beep don't have to override.
+    virtual void bell() {}
 };
 
 }  // namespace term

@@ -20,7 +20,9 @@
 #include "cooked_input.hpp"
 #include "cursor_renderer.hpp"
 #include "display_m5gfx.hpp"
+#include "input_touch.hpp"
 #include "input_usb_jtag.hpp"
+#include "status_bar.hpp"
 #if CONFIG_TAB5_UART_INPUT_ENABLED
 #include "input_uart.hpp"
 #endif
@@ -216,6 +218,18 @@ extern "C" void app_main(void) {
         }
     }
 #endif
+
+    tab5::start_status_bar([](std::function<void()> body) {
+        Lock lk;
+        body();
+    });
+
+    tab5::start_touch_input([](const tab5::TouchPoint& p) {
+        const char* ev = p.event == tab5::TouchEvent::Down ? "down"
+                       : p.event == tab5::TouchEvent::Move ? "move"
+                       : "up";
+        ESP_LOGI(kTag, "touch %s at (%d, %d)", ev, p.x, p.y);
+    });
 
     if (auto rc = tab5::start_usb_jtag_input(usb_sink); !rc) {
         ESP_LOGE(kTag, "USB-JTAG input start failed");

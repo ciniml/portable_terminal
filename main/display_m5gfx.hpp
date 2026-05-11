@@ -23,6 +23,7 @@ public:
     term::Result<void> draw_cells(uint16_t row, uint16_t col,
                                   std::span<const term::Cell> cells) override;
     term::Result<void> flush(term::DamageRect r) override;
+    void bell() override;
 
 private:
     uint16_t cols_;
