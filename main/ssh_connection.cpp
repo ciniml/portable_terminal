@@ -20,6 +20,12 @@
 
 #include "libssh2.h"
 
+#if CONFIG_TAB5_SSH_PUBKEY_AUTH
+// main/keys/id_rsa, baked in via EMBED_FILES in main/CMakeLists.txt.
+extern "C" const uint8_t _binary_id_rsa_start[];
+extern "C" const uint8_t _binary_id_rsa_end[];
+#endif
+
 namespace tab5 {
 
 namespace {
@@ -341,7 +347,69 @@ bool SshConnection::start(ByteSink rx_sink) {
              "host key SHA256:%.16s...%s", fp_hex,
              first_use ? "  (first use)" : "");
 
-    rc = libssh2_userauth_password(g_sess.sess, cfg.user, cfg.password);
+    // Ask the server which userauth methods it advertises — useful when
+    // diagnosing why publickey or password is silently rejected.
+    {
+        size_t ulen = std::strlen(cfg.user);
+        char* methods = libssh2_userauth_list(g_sess.sess, cfg.user, ulen);
+        if (methods) {
+            ESP_LOGI(kTag, "server userauth methods: %s", methods);
+        } else {
+            ESP_LOGW(kTag, "userauth_list returned null (server may have "
+                           "already authenticated as 'none')");
+        }
+    }
+
+    rc = -1;  // start at "no auth attempted yet"
+#if CONFIG_TAB5_SSH_PUBKEY_AUTH
+    {
+        size_t privlen = static_cast<size_t>(
+            _binary_id_rsa_end - _binary_id_rsa_start);
+        ESP_LOGI(kTag,
+                 "publickey auth: trying key from EMBED_FILES (%u bytes, "
+                 "starts with: %.20s)",
+                 static_cast<unsigned>(privlen),
+                 reinterpret_cast<const char*>(_binary_id_rsa_start));
+        // Pass nullptr/0 for the public-key buffer — libssh2 derives the
+        // public half from the private key when the pubkey arg is empty.
+        rc = libssh2_userauth_publickey_frommemory(
+            g_sess.sess, cfg.user, std::strlen(cfg.user),
+            nullptr, 0,
+            reinterpret_cast<const char*>(_binary_id_rsa_start), privlen,
+            CONFIG_TAB5_SSH_KEY_PASSPHRASE);
+        if (rc == 0) {
+            ESP_LOGI(kTag, "publickey auth OK");
+        } else {
+            char* err_msg = nullptr;
+            int   err_len = 0;
+            int err_code = libssh2_session_last_error(g_sess.sess,
+                                                      &err_msg, &err_len, 0);
+            ESP_LOGW(kTag,
+                     "publickey auth failed: rc=%d session_last_error=%d "
+                     "msg='%.*s' — falling back to password",
+                     rc, err_code, err_len, err_msg ? err_msg : "");
+            // Common rc decoding for quick reference:
+            //   -16 LIBSSH2_ERROR_PUBLICKEY_UNRECOGNIZED — server rejected key
+            //   -17 LIBSSH2_ERROR_PUBLICKEY_UNVERIFIED  — signature mismatch
+            //   -18 LIBSSH2_ERROR_AUTHENTICATION_FAILED — wrong user / "publickey"
+            //                                            not in server methods
+            //   -19 LIBSSH2_ERROR_FILE                  — key parse / decrypt failure
+            //   -10 LIBSSH2_ERROR_ALLOC                 — OOM
+        }
+    }
+#endif
+    if (rc != 0) {
+        rc = libssh2_userauth_password(g_sess.sess, cfg.user, cfg.password);
+        if (rc != 0) {
+            char* err_msg = nullptr;
+            int   err_len = 0;
+            int err_code = libssh2_session_last_error(g_sess.sess,
+                                                      &err_msg, &err_len, 0);
+            ESP_LOGE(kTag, "password auth failed: rc=%d session_last_error=%d "
+                           "msg='%.*s'",
+                     rc, err_code, err_len, err_msg ? err_msg : "");
+        }
+    }
     if (rc != 0) {
         ESP_LOGE(kTag, "auth failed: %d", rc);
         shutdown_session();

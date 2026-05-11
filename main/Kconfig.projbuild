@@ -130,8 +130,26 @@ menu "Tab5 terminal"
             depends on TAB5_SSH_ENABLED
             default ""
             help
-                Password for password authentication. MVP only; public-key
-                auth is out of scope.
+                Password for password authentication. Used as a fallback
+                if TAB5_SSH_PUBKEY_AUTH is enabled and the key step fails,
+                or as the primary auth method when public-key auth is off.
+
+        config TAB5_SSH_PUBKEY_AUTH
+            bool "Try public-key authentication first"
+            depends on TAB5_SSH_ENABLED
+            default n
+            help
+                Embed the PEM private key at main/keys/id_rsa into the
+                firmware and use it via libssh2_userauth_publickey_frommemory
+                before falling back to password auth. Generate the key with:
+                    ssh-keygen -m PEM -t rsa -b 2048 -f main/keys/id_rsa
+                The keys/ directory is gitignored; do NOT commit private keys.
+                Authorise the matching .pub on the remote with ssh-copy-id.
+
+        config TAB5_SSH_KEY_PASSPHRASE
+            string "Private-key passphrase (if encrypted)"
+            depends on TAB5_SSH_PUBKEY_AUTH
+            default ""
 
         config TAB5_SSH_RX_TASK_STACK
             int "ssh_task stack size (bytes)"

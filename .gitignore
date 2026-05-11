@@ -11,3 +11,5 @@ dependencies.lock
 .cache/
 .vscode/
 compile_commands.json
+# SSH keys for CONFIG_TAB5_SSH_PUBKEY_AUTH — never commit private keys.
+main/keys/

@@ -148,10 +148,29 @@ Two concrete implementations ship:
 When `CONFIG_TAB5_SSH_ENABLED=y` and Wi-Fi has come up, `app_main`
 opens an interactive shell session to the configured server via
 [main/ssh_connection.{hpp,cpp}](main/ssh_connection.cpp), built on
-libssh2 1.11.1 + mbedTLS (`LIBSSH2_MBEDTLS=1`). MVP scope: password
-auth, single session, no reconnect. Configure host / port / user /
-password via `idf.py menuconfig` → "Tab5 terminal" → "SSH" or in
-`sdkconfig.defaults.local`.
+libssh2 1.11.1 + mbedTLS (`LIBSSH2_MBEDTLS=1`). Configure host /
+port / user / password via `idf.py menuconfig` → "Tab5 terminal"
+→ "SSH" or in `sdkconfig.defaults.local`.
+
+#### Public-key authentication
+
+Set `CONFIG_TAB5_SSH_PUBKEY_AUTH=y` and drop a PEM RSA private key
+at [main/keys/id_rsa](main/keys/) (the `main/keys/` directory is
+gitignored — do not commit private keys). The build embeds the key
+via `EMBED_FILES`; the runtime calls
+`libssh2_userauth_publickey_frommemory` and falls back to password
+authentication if it fails. libssh2 derives the public key from the
+private one, so a `.pub` file isn't strictly needed in the firmware
+— you only need it on the server side via `ssh-copy-id`. Generate:
+
+```bash
+ssh-keygen -m PEM -t rsa -b 2048 -f main/keys/id_rsa
+ssh-copy-id -i main/keys/id_rsa.pub user@host
+```
+
+PEM RSA / EC keys are the supported formats. New-format OpenSSH
+(`-----BEGIN OPENSSH PRIVATE KEY-----`, including ed25519) won't
+load under libssh2 + mbedTLS without additional patches.
 
 ### Telnet
 

@@ -34,3 +34,9 @@
 # CONFIG_TAB5_SSH_USER="me"
 # CONFIG_TAB5_SSH_PASSWORD="hunter2"
 # CONFIG_TAB5_SSH_RX_TASK_STACK=8192
+# Public-key auth — place your private key at main/keys/id_rsa (PEM RSA).
+# Falls back to TAB5_SSH_PASSWORD on auth failure.
+#   ssh-keygen -m PEM -t rsa -b 2048 -f main/keys/id_rsa
+#   ssh-copy-id -i main/keys/id_rsa.pub me@192.168.1.10
+# CONFIG_TAB5_SSH_PUBKEY_AUTH=y
+# CONFIG_TAB5_SSH_KEY_PASSPHRASE=""
