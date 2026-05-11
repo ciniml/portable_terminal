@@ -17,6 +17,16 @@
 # CONFIG_TAB5_UART_INPUT_RX_GPIO=53
 # CONFIG_TAB5_UART_INPUT_BAUD=115200
 
+# --- Remote connection (SSH preferred, Telnet fallback) ---------------
+# When both are enabled, SSH is attempted first; Telnet is used only
+# when SSH start fails (or is disabled). Both require Wi-Fi enabled.
+
+# --- Telnet -----------------------------------------------------------
+# CONFIG_TAB5_TELNET_ENABLED=y
+# CONFIG_TAB5_TELNET_HOST="192.168.1.5"
+# CONFIG_TAB5_TELNET_PORT=23
+# CONFIG_TAB5_TELNET_RX_TASK_STACK=6144
+
 # --- SSH client (requires Wi-Fi enabled) ------------------------------
 # CONFIG_TAB5_SSH_ENABLED=y
 # CONFIG_TAB5_SSH_HOST="192.168.1.10"

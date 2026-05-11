@@ -65,6 +65,36 @@ menu "Tab5 terminal"
 
     endmenu
 
+    menu "Telnet"
+
+        config TAB5_TELNET_ENABLED
+            bool "Enable Telnet client"
+            default n
+            depends on TAB5_WIFI_ENABLED
+            help
+                Plain TCP + RFC 854 telnet. The app picks this only if
+                SSH is disabled (or SSH start failed) — SSH takes
+                priority when both are enabled.
+
+        config TAB5_TELNET_HOST
+            string "Server host"
+            depends on TAB5_TELNET_ENABLED
+            default ""
+
+        config TAB5_TELNET_PORT
+            int "Server port"
+            depends on TAB5_TELNET_ENABLED
+            default 23
+            range 1 65535
+
+        config TAB5_TELNET_RX_TASK_STACK
+            int "telnet_task stack size (bytes)"
+            depends on TAB5_TELNET_ENABLED
+            default 6144
+            range 4096 32768
+
+    endmenu
+
     menu "SSH"
 
         config TAB5_SSH_ENABLED

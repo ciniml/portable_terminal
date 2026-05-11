@@ -132,21 +132,42 @@ Wi-Fi is gated on `CONFIG_TAB5_WIFI_ENABLED` (default off) so a fresh
 clone still builds and runs without a configured network or a re-flashed
 C6.
 
-## SSH client
+## Remote connection abstraction
 
-When `CONFIG_TAB5_SSH_ENABLED=y` and Wi-Fi has come up, `app_main` opens
-an interactive shell session to the configured server and routes
-locally-typed bytes (USB-JTAG + UART) to it. The implementation lives in
-[main/ssh_client.{hpp,cpp}](main/ssh_client.cpp) and uses libssh2 1.11.1
-with the mbedTLS backend (`LIBSSH2_MBEDTLS=1`). MVP scope: password
+[main/connection.hpp](main/connection.hpp) defines `IConnection`
+(`start / stop / send / resize / is_connected / kind / host_label`),
+the uniform surface used by `app_main`, the status panel, and the
+soft-keyboard resize plumbing. A single active connection at a time
+is tracked via `tab5::active_connection()` (MVP — multi-session is
+future work).
+
+Two concrete implementations ship:
+
+### SSH
+
+When `CONFIG_TAB5_SSH_ENABLED=y` and Wi-Fi has come up, `app_main`
+opens an interactive shell session to the configured server via
+[main/ssh_connection.{hpp,cpp}](main/ssh_connection.cpp), built on
+libssh2 1.11.1 + mbedTLS (`LIBSSH2_MBEDTLS=1`). MVP scope: password
 auth, single session, no reconnect. Configure host / port / user /
 password via `idf.py menuconfig` → "Tab5 terminal" → "SSH" or in
 `sdkconfig.defaults.local`.
 
-While SSH is up, the input sinks bypass the `CookedInputFilter` —
-SSH expects raw keystrokes and the remote shell handles CR/BS itself.
-If `ssh_client.start()` fails, sinks fall back to the local-echo
-terminal so the device stays usable as a status display.
+### Telnet
+
+When SSH is disabled (or its `start()` failed) and
+`CONFIG_TAB5_TELNET_ENABLED=y`, `app_main` falls back to plain TCP +
+RFC 854 telnet via
+[main/telnet_connection.{hpp,cpp}](main/telnet_connection.cpp). The
+implementation strips IAC option negotiations from the RX stream
+(refusing every DO/WILL with DONT/WONT, except DO NAWS which is
+accepted), escapes literal 0xFF on TX, and reports window-size
+changes through NAWS subnegotiation.
+
+While a remote session is up, the input sinks bypass the
+`CookedInputFilter` — the remote handles CR/BS itself. If start
+fails, sinks fall back to the local-echo terminal so the device
+stays usable as a status display.
 
 **Host-key verification: TOFU (Trust On First Use).** First connect to
 a given host:port records SHA-256 of `libssh2_session_hostkey()` in NVS

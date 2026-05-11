@@ -9,7 +9,9 @@ idf_component_register(
         "input_touch.cpp"
         "soft_keyboard.cpp"
         "wifi_setup.cpp"
-        "ssh_client.cpp"
+        "connection.cpp"
+        "ssh_connection.cpp"
+        "telnet_connection.cpp"
         "status_bar.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES

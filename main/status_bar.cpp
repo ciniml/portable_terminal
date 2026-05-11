@@ -12,11 +12,9 @@
 #include "M5Unified.h"
 
 #include "sdkconfig.h"
+#include "connection.hpp"
 #if CONFIG_TAB5_WIFI_ENABLED
 #include "wifi_setup.hpp"
-#endif
-#if CONFIG_TAB5_SSH_ENABLED
-#include "ssh_client.hpp"
 #endif
 
 namespace tab5 {
@@ -119,16 +117,23 @@ void render_locked() {
     d.setTextColor(kFgColor, kBgColor);
 #endif
 
-#if CONFIG_TAB5_SSH_ENABLED
-    if (ssh_client.is_connected()) {
+    if (auto* c = active_connection(); c && c->is_connected()) {
+        char ln[40];
+        snprintf(ln, sizeof(ln), "%s: up", c->kind());
         d.setTextColor(kBatGoodColor, kBgColor);
-        value("SSH: connected");
+        value(ln);
+        d.setTextColor(kFgColor, kBgColor);
+        // Print host label, truncated to fit the panel.
+        char host[40];
+        snprintf(host, sizeof(host), "%.30s", c->host_label());
+        value(host);
     } else {
+#if CONFIG_TAB5_SSH_ENABLED || CONFIG_TAB5_TELNET_ENABLED
         d.setTextColor(kBatLowColor, kBgColor);
-        value("SSH: down");
-    }
-    d.setTextColor(kFgColor, kBgColor);
+        value("Remote: down");
+        d.setTextColor(kFgColor, kBgColor);
 #endif
+    }
 
     // --- Uptime --------------------------------------------------
     y += 6;

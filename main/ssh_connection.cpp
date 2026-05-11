@@ -1,4 +1,4 @@
-#include "ssh_client.hpp"
+#include "ssh_connection.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -34,10 +34,10 @@ struct Session {
     LIBSSH2_CHANNEL* chan = nullptr;
     int sock = -1;
     StreamBufferHandle_t tx = nullptr;
-    SshRxApply rx_apply;
+    ByteSink rx_apply;
     std::atomic<bool> running{false};
     char banner[96] = {0};
-    // Pending pty resize. Producer: any thread via SshClient::resize_pty.
+    // Pending pty resize. Producer: any thread via SshConnection::resize.
     // Consumer: ssh_task on its next poll. cols==0 means "no pending".
     std::atomic<uint16_t> pending_cols{0};
     std::atomic<uint16_t> pending_rows{0};
@@ -235,9 +235,16 @@ void ssh_task(void* /*arg*/) {
 
 }  // namespace
 
-SshClient ssh_client;
+SshConnection::SshConnection(const SshConfig& cfg) : cfg_(cfg) {
+    snprintf(label_, sizeof(label_), "%s@%s",
+             cfg.user ? cfg.user : "?",
+             cfg.host ? cfg.host : "?");
+}
 
-bool SshClient::start(const SshConfig& cfg, SshRxApply rx_apply) {
+SshConnection::~SshConnection() { stop(); }
+
+bool SshConnection::start(ByteSink rx_sink) {
+    const SshConfig& cfg = cfg_;
     if (g_sess.running) {
         ESP_LOGW(kTag, "already running");
         return false;
@@ -336,7 +343,7 @@ bool SshClient::start(const SshConfig& cfg, SshRxApply rx_apply) {
         shutdown_session();
         return false;
     }
-    g_sess.rx_apply = std::move(rx_apply);
+    g_sess.rx_apply = std::move(rx_sink);
     g_sess.running = true;
 
     BaseType_t ok = xTaskCreate(&ssh_task, "ssh_task",
@@ -353,12 +360,12 @@ bool SshClient::start(const SshConfig& cfg, SshRxApply rx_apply) {
     return true;
 }
 
-void SshClient::send(std::span<const uint8_t> bytes) {
+void SshConnection::send(std::span<const uint8_t> bytes) {
     if (!g_sess.running || !g_sess.tx) return;
     xStreamBufferSend(g_sess.tx, bytes.data(), bytes.size(), 0);
 }
 
-void SshClient::resize_pty(uint16_t cols, uint16_t rows) {
+void SshConnection::resize(uint16_t cols, uint16_t rows) {
     if (!g_sess.running || cols == 0 || rows == 0) return;
     // Rows first so the consumer's exchange(cols=0) check never sees a
     // half-published pair.
@@ -366,8 +373,16 @@ void SshClient::resize_pty(uint16_t cols, uint16_t rows) {
     g_sess.pending_cols.store(cols);
 }
 
-bool SshClient::is_connected() const {
+bool SshConnection::is_connected() const {
     return g_sess.running;
+}
+
+void SshConnection::stop() {
+    if (!g_sess.running) return;
+    g_sess.running = false;
+    // ssh_task observes !running on its next tick, exits its loop, and
+    // calls shutdown_session() before vTaskDelete. We don't join here —
+    // teardown is cooperative.
 }
 
 }  // namespace tab5

@@ -31,8 +31,12 @@
 #if CONFIG_TAB5_WIFI_ENABLED
 #include "wifi_setup.hpp"
 #endif
+#include "connection.hpp"
 #if CONFIG_TAB5_SSH_ENABLED
-#include "ssh_client.hpp"
+#include "ssh_connection.hpp"
+#endif
+#if CONFIG_TAB5_TELNET_ENABLED
+#include "telnet_connection.hpp"
 #endif
 #include "term_core/terminal.hpp"
 
@@ -174,17 +178,11 @@ extern "C" void app_main(void) {
     tab5::ByteSink uart_sink = make_source_sink(apply);
 #endif
 
-#if CONFIG_TAB5_SSH_ENABLED
+    // Remote connection (SSH preferred, Telnet fallback). The chosen
+    // implementation outlives app_main — held in static storage.
+    static std::unique_ptr<tab5::IConnection> conn;
     if (tab5::wifi_status().connected) {
-        char line[160];
-        snprintf(line, sizeof(line),
-                 "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
-                 CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST,
-                 CONFIG_TAB5_SSH_PORT);
-        term_write(line);
-
-        // ssh_task posts RX into the terminal under g_mutex, then renders.
-        auto ssh_rx = [](std::span<const uint8_t> bytes) {
+        auto remote_rx = [](std::span<const uint8_t> bytes) {
             Lock lk;
             cursor.erase();
             (void)terminal.feed(bytes);
@@ -192,38 +190,70 @@ extern "C" void app_main(void) {
             cursor.draw();
         };
 
-        tab5::SshConfig scfg{
-            .host = CONFIG_TAB5_SSH_HOST,
-            .port = static_cast<uint16_t>(CONFIG_TAB5_SSH_PORT),
-            .user = CONFIG_TAB5_SSH_USER,
-            .password = CONFIG_TAB5_SSH_PASSWORD,
-            .cols = kCols,
-            .rows = kRows,
-            .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
-        };
-
-        if (tab5::ssh_client.start(scfg, ssh_rx)) {
+#if CONFIG_TAB5_SSH_ENABLED
+        {
+            char line[160];
             snprintf(line, sizeof(line),
-                     "\x1b[32mSSH connected\x1b[0m  %s@%s\r\n",
-                     CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST);
+                     "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
+                     CONFIG_TAB5_SSH_USER, CONFIG_TAB5_SSH_HOST,
+                     CONFIG_TAB5_SSH_PORT);
             term_write(line);
-            // While SSH is up, bypass the cooked-input filter — SSH expects
-            // raw bytes and the remote side echoes / handles BS itself, so
-            // running CR→CRLF / BS-Space-BS locally would double-edit.
-            usb_sink = [](std::span<const uint8_t> bytes) {
-                tab5::ssh_client.send(bytes);
+            tab5::SshConfig scfg{
+                .host = CONFIG_TAB5_SSH_HOST,
+                .port = static_cast<uint16_t>(CONFIG_TAB5_SSH_PORT),
+                .user = CONFIG_TAB5_SSH_USER,
+                .password = CONFIG_TAB5_SSH_PASSWORD,
+                .cols = kCols,
+                .rows = kRows,
+                .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
             };
+            auto c = std::make_unique<tab5::SshConnection>(scfg);
+            if (c->start(remote_rx)) conn = std::move(c);
+        }
+#endif
+#if CONFIG_TAB5_TELNET_ENABLED
+        if (!conn) {
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "\x1b[2mTelnet: connecting to %s:%d ...\x1b[0m\r\n",
+                     CONFIG_TAB5_TELNET_HOST, CONFIG_TAB5_TELNET_PORT);
+            term_write(line);
+            tab5::TelnetConfig tcfg{
+                .host = CONFIG_TAB5_TELNET_HOST,
+                .port = static_cast<uint16_t>(CONFIG_TAB5_TELNET_PORT),
+                .cols = kCols,
+                .rows = kRows,
+                .task_stack_bytes = CONFIG_TAB5_TELNET_RX_TASK_STACK,
+            };
+            auto c = std::make_unique<tab5::TelnetConnection>(tcfg);
+            if (c->start(remote_rx)) conn = std::move(c);
+        }
+#endif
+
+        if (conn) {
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "\x1b[32m%s connected\x1b[0m  %s\r\n",
+                     conn->kind(), conn->host_label());
+            term_write(line);
+            tab5::set_active_connection(conn.get());
+            // While the remote session is up, bypass the cooked-input
+            // filter — the remote echoes / handles BS itself, so doing
+            // CR→CRLF / BS-Space-BS locally would double-edit.
+            auto remote_send = [](std::span<const uint8_t> bytes) {
+                if (auto* c = tab5::active_connection()) c->send(bytes);
+            };
+            usb_sink = remote_send;
 #if CONFIG_TAB5_UART_INPUT_ENABLED
-            uart_sink = [](std::span<const uint8_t> bytes) {
-                tab5::ssh_client.send(bytes);
-            };
+            uart_sink = remote_send;
 #endif
         } else {
-            term_write("\x1b[31mSSH connect failed\x1b[0m  "
+#if CONFIG_TAB5_SSH_ENABLED || CONFIG_TAB5_TELNET_ENABLED
+            term_write("\x1b[31mRemote connect failed\x1b[0m  "
                        "(falling back to local echo)\r\n");
+#endif
         }
     }
-#endif
 
     tab5::start_status_bar([](std::function<void()> body) {
         Lock lk;
@@ -248,9 +278,9 @@ extern "C" void app_main(void) {
         if (terminal.screen().rows() != want_rows) {
             terminal.resize(kCols, want_rows);
             display.set_grid_size(kCols, want_rows);
-#if CONFIG_TAB5_SSH_ENABLED
-            tab5::ssh_client.resize_pty(kCols, want_rows);
-#endif
+            if (auto* c = tab5::active_connection()) {
+                c->resize(kCols, want_rows);
+            }
             cursor.erase();
             (void)terminal.render_dirty();
             // Clear any gap between the terminal bottom and the keyboard
