@@ -24,6 +24,9 @@
 #if CONFIG_TAB5_UART_INPUT_ENABLED
 #include "input_uart.hpp"
 #endif
+#if CONFIG_TAB5_WIFI_ENABLED
+#include "wifi_setup.hpp"
+#endif
 #include "term_core/terminal.hpp"
 
 namespace {
@@ -100,6 +103,41 @@ extern "C" void app_main(void) {
         (void)terminal.render_dirty();
         cursor.draw();
     }
+
+    auto term_write = [](std::string_view s) {
+        Lock lk;
+        cursor.erase();
+        (void)terminal.feed(s);
+        (void)terminal.render_dirty();
+        cursor.draw();
+    };
+
+#if CONFIG_TAB5_WIFI_ENABLED
+    {
+        char line[128];
+        snprintf(line, sizeof(line),
+                 "\x1b[2mWi-Fi: connecting to %s ...\x1b[0m\r\n",
+                 CONFIG_TAB5_WIFI_SSID);
+        term_write(line);
+
+        auto rc = tab5::wifi_sta_connect(CONFIG_TAB5_WIFI_SSID,
+                                         CONFIG_TAB5_WIFI_PSK,
+                                         CONFIG_TAB5_WIFI_CONNECT_TIMEOUT_S);
+        if (rc) {
+            auto st = tab5::wifi_status();
+            uint8_t a = (st.ip4 >>  0) & 0xFF;
+            uint8_t b = (st.ip4 >>  8) & 0xFF;
+            uint8_t c = (st.ip4 >> 16) & 0xFF;
+            uint8_t d = (st.ip4 >> 24) & 0xFF;
+            snprintf(line, sizeof(line),
+                     "\x1b[32mWi-Fi connected\x1b[0m  IP=%u.%u.%u.%u\r\n\r\n",
+                     a, b, c, d);
+            term_write(line);
+        } else {
+            term_write("\x1b[31mWi-Fi connect failed\x1b[0m\r\n\r\n"sv);
+        }
+    }
+#endif
 
     const esp_timer_create_args_t blink_args = {
         .callback = &on_blink_tick,

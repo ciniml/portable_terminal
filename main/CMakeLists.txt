@@ -6,6 +6,7 @@ idf_component_register(
         "display_m5gfx.cpp"
         "input_usb_jtag.cpp"
         "input_uart.cpp"
+        "wifi_setup.cpp"
     INCLUDE_DIRS "."
     PRIV_REQUIRES
         term_core
@@ -14,6 +15,10 @@ idf_component_register(
         esp_driver_usb_serial_jtag
         esp_driver_uart
         esp_timer
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
         # carried for later phases (unused yet):
         wireguard
         tailscale

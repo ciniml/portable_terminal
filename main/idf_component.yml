@@ -1,0 +1,10 @@
+## IDF Component Manager manifest for the Tab5 terminal app.
+dependencies:
+  idf: '>=6.0'
+  # Wi-Fi via the on-board ESP32-C6 co-processor.
+  # esp_hosted 2.x is the only line that compiles cleanly under IDF 6.0
+  # (1.4.x predates the esp_driver_sdmmc split). The protocol differs from
+  # the V1.4.1 firmware that ships from the M5 factory, so the C6 has to
+  # be re-flashed with a matching 2.x slave (see CLAUDE.md).
+  espressif/esp_hosted: '^2.12.7'
+  espressif/esp_wifi_remote: '^1.5.1'

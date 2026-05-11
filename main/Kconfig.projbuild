@@ -37,4 +37,32 @@ menu "Tab5 terminal"
         depends on TAB5_UART_INPUT_ENABLED
         default 115200
 
+    menu "Wi-Fi"
+
+        config TAB5_WIFI_ENABLED
+            bool "Enable Wi-Fi station"
+            default n
+            help
+                When enabled, the app brings up the ESP32-C6 Wi-Fi
+                co-processor and joins the AP configured below.
+                Requires the matching C6 firmware to be flashed
+                (see wifi_c6_fw/ in M5Tab5-UserDemo).
+
+        config TAB5_WIFI_SSID
+            string "SSID"
+            depends on TAB5_WIFI_ENABLED
+            default ""
+
+        config TAB5_WIFI_PSK
+            string "WPA2 pre-shared key"
+            depends on TAB5_WIFI_ENABLED
+            default ""
+
+        config TAB5_WIFI_CONNECT_TIMEOUT_S
+            int "Initial connect timeout (seconds)"
+            depends on TAB5_WIFI_ENABLED
+            default 20
+
+    endmenu
+
 endmenu
