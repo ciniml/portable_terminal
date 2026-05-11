@@ -77,40 +77,43 @@ audio works. Phase 1b only exercises display rendering, so this is deferred.
 
 ## espressif/esp_hosted 2.12.7 — Tab5 SDIO link
 
-`managed_components/espressif__esp_hosted` is fetched by the IDF component
-manager (not a submodule); `git status` does not surface its dirty state.
-The single patch below is required for Wi-Fi via the on-board C6 to come
-up on Tab5; without it `sdmmc_init_ocr` (CMD5 / `send_op_cond`) times out
-with `0x107` forever.
-
-If the managed component is re-downloaded (`rm -rf
-managed_components/espressif__esp_hosted` + rebuild), the patch must be
-re-applied.
-
-### `host/drivers/transport/sdio/sdio_drv.c` — `transport_gpio_reset()`
-
-Upstream's reset pulse leaves the slave's CHIP_EN line driven to the
-`ACTIVE` level on exit:
+esp_hosted 2.x's `transport_gpio_reset()` runs an X → !X → X pulse and
+leaves the reset GPIO driven at the **ACTIVE** level on exit:
 ```c
 write_gpio(reset_pin, H_RESET_VAL_ACTIVE);
 msleep(10);
 write_gpio(reset_pin, H_RESET_VAL_INACTIVE);
 msleep(10);
-write_gpio(reset_pin, H_RESET_VAL_ACTIVE);    /* <-- chip ends in reset */
+write_gpio(reset_pin, H_RESET_VAL_ACTIVE);    /* <-- final state */
 msleep(H_HOST_SDIO_RESET_DELAY_MS);
 ```
-On Tab5 the reset GPIO (`GPIO 15`) is wired straight to the C6's CHIP_EN
-(active high), so `H_RESET_VAL_ACTIVE` = LOW = chip held disabled. The
-subsequent `sdmmc_card_init()` issues CMD5 against a chip that's still in
-reset and times out.
+On Tab5, GPIO 15 is wired directly to the C6's CHIP_EN, which is active
+high (HIGH = chip runs, LOW = chip held in reset). If we tell esp_hosted
+the reset is active-low (per the conventional reset-signal naming),
+`H_RESET_VAL_ACTIVE = LOW` and the pulse exits with the C6 disabled.
+`sdmmc_card_init()` then sends CMD5 to a chip that's still in reset and
+times out with `0x107`.
 
-In esp_hosted 1.4 (the version M5Tab5-UserDemo uses on IDF 5.4) this
-worked because the SDMMC bus was initialised inside
-`transport_init_internal()` — BEFORE the reset pulse, while the C6 was
-still in its freshly-booted state. In 2.x the order is reversed.
+esp_hosted 1.4 (the version M5Tab5-UserDemo runs on IDF 5.4) gets away
+with the same final state because there the SDMMC bus is initialised
+inside `transport_init_internal()` — BEFORE the reset pulse runs, while
+the C6 is still in its freshly-booted state. The order is reversed in
+esp_hosted 2.x.
 
-The local patch comments out the trailing `ACTIVE` write so the C6 is
-left running (`H_RESET_VAL_INACTIVE` = HIGH) when CMD5 finally arrives.
+### Workaround: invert the Kconfig polarity
+
+We set `CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y` in
+`sdkconfig.defaults.esp32p4` (instead of `ACTIVE_LOW`). esp_hosted then
+defines `H_RESET_VAL_ACTIVE = HIGH`, so the same X → !X → X pulse
+becomes **HIGH → LOW → HIGH** — exactly the waveform a C6 with active-
+high CHIP_EN wants (asserted briefly to reset, then released). No
+managed-component source patch is needed.
+
+The Kconfig name is technically wrong about the *reset* polarity, but
+right about the resulting GPIO levels. Treat the
+ACTIVE_HIGH/ACTIVE_LOW choice in `esp_hosted` as "level the pin sits
+at after reset_slave returns" rather than "asserted level of the reset
+signal".
 
 ## espressif/esp_hosted 1.4.0 — c6_updater quirks
 

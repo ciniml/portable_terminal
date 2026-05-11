@@ -31,7 +31,17 @@ CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
 # CONFIG_ESP_HOSTED_SPI_HOST_INTERFACE is not set
 CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
 # CONFIG_ESP_HOSTED_SDIO_1_BIT_BUS is not set
-CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+# Polarity workaround for esp_hosted 2.x + Tab5: upstream's reset_slave
+# sequence is X -> !X -> X, leaving the pin driven at the "ACTIVE" level
+# on exit. Tab5's GPIO 15 is wired to the C6's CHIP_EN (HIGH = run, LOW =
+# reset). To leave the C6 running after the pulse — which is what
+# sdmmc_card_init's CMD5 needs to succeed — we tell esp_hosted that this
+# is an "active high" reset so its `ACTIVE` level becomes HIGH. The pulse
+# polarity is technically inverted from the conventional "active-low
+# reset" naming, but the resulting waveform (HIGH → LOW → HIGH) is exactly
+# what the C6 wants for a clean reset + release.
+# CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW is not set
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
 CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_STREAMING_MODE=y
 CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=15
 # CONFIG_ESP_HOSTED_SDIO_PIN_* are computed Kconfig values; the actual
