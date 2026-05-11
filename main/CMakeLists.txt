@@ -7,6 +7,7 @@ idf_component_register(
         "input_usb_jtag.cpp"
         "input_uart.cpp"
         "input_touch.cpp"
+        "soft_keyboard.cpp"
         "wifi_setup.cpp"
         "ssh_client.cpp"
         "status_bar.cpp"

@@ -33,6 +33,13 @@ public:
     DamageRect take_damage();
     bool dirty() const { return !damage_.empty(); }
 
+    // Mark a rectangular region [r0, r1) x [c0, c1) dirty without changing
+    // cell contents — used when external overlays (e.g. soft keyboard) hide
+    // some rows and need them re-rendered when revealed.
+    void mark_region(uint16_t r0, uint16_t c0, uint16_t r1, uint16_t c1) {
+        mark_rect(r0, c0, r1, c1);
+    }
+
     // BEL (0x07) counter. Incremented by execute(); cleared by
     // take_bell_pending(). Caller is expected to ring once per drain
     // regardless of how many BELs accumulated.

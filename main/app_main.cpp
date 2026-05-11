@@ -22,6 +22,7 @@
 #include "display_m5gfx.hpp"
 #include "input_touch.hpp"
 #include "input_usb_jtag.hpp"
+#include "soft_keyboard.hpp"
 #include "status_bar.hpp"
 #if CONFIG_TAB5_UART_INPUT_ENABLED
 #include "input_uart.hpp"
@@ -224,11 +225,41 @@ extern "C" void app_main(void) {
         body();
     });
 
+    // Soft keyboard. The byte sink writes through whatever usb_sink points
+    // at — SSH when connected, local-echo otherwise. (Both already bypass
+    // the cooked filter where appropriate.) Captured by reference so a
+    // post-boot sink change would be visible, though in practice we set it
+    // once above.
+    static tab5::SoftKeyboard kbd([&](std::span<const uint8_t> bytes) {
+        usb_sink(bytes);
+    });
+    // Caller must already hold g_mutex. Called from handle_touch (which the
+    // touch task runs under Lock) and from initial paint below.
+    static auto repaint_kbd = [] {
+        if (!kbd.visible()) {
+            // Mark the terminal rows previously covered by the panel
+            // dirty so they render through underneath.
+            auto r = kbd.panel_rect();
+            int r0 = r.y0 / 24;
+            int r1 = (r.y1 + 23) / 24;
+            if (r0 < 0) r0 = 0;
+            if (r1 > kRows) r1 = kRows;
+            terminal.screen().mark_region(static_cast<uint16_t>(r0), 0,
+                                          static_cast<uint16_t>(r1),
+                                          terminal.screen().cols());
+            cursor.erase();
+            (void)terminal.render_dirty();
+            cursor.draw();
+        }
+        kbd.render();
+    };
+    kbd.set_repaint(repaint_kbd);
+    // Initial paint of the always-visible toggle.
+    { Lock lk; kbd.render(); }
+
     tab5::start_touch_input([](const tab5::TouchPoint& p) {
-        const char* ev = p.event == tab5::TouchEvent::Down ? "down"
-                       : p.event == tab5::TouchEvent::Move ? "move"
-                       : "up";
-        ESP_LOGI(kTag, "touch %s at (%d, %d)", ev, p.x, p.y);
+        Lock lk;
+        kbd.handle_touch(p);
     });
 
     if (auto rc = tab5::start_usb_jtag_input(usb_sink); !rc) {
