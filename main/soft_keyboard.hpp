@@ -24,6 +24,15 @@ class SoftKeyboard {
 public:
     explicit SoftKeyboard(ByteSink sink);
 
+    // Swap the byte sink at runtime — used by the menu's profile editor
+    // to capture keys into a text buffer instead of forwarding them to
+    // the remote connection. Pass the saved value back to restore.
+    ByteSink swap_sink(ByteSink replacement) {
+        ByteSink prev = std::move(sink_);
+        sink_ = std::move(replacement);
+        return prev;
+    }
+
     // Process a touch event. Returns true if the event was consumed
     // (toggle pressed, key pressed, etc.) so the caller can suppress
     // further handlers. Calls may emit bytes through the sink and / or

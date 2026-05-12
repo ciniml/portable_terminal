@@ -385,6 +385,7 @@ extern "C" void app_main(void) {
         ui::invalidate(ui::kFullScreen);
     };
     tab5::menu.set_repaint(repaint_menu);
+    tab5::menu.bind_keyboard(&kbd);
     kbd.set_on_menu([] { tab5::menu.open(); });
 
     // Initial paint of every layer in z order.
@@ -392,10 +393,9 @@ extern "C" void app_main(void) {
 
     tab5::start_touch_input([](const tab5::TouchPoint& p) {
         Lock lk;
-        if (tab5::menu.visible()) {
-            tab5::menu.handle_touch(p);
-            return;
-        }
+        if (tab5::menu.visible() && tab5::menu.handle_touch(p)) return;
+        // Menu may return false to let the soft keyboard receive the
+        // tap while the profile editor is up (keyboard area).
         kbd.handle_touch(p);
     });
 
