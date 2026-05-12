@@ -20,6 +20,8 @@
 
 #include "libssh2.h"
 
+#include "tofu.hpp"
+
 #if CONFIG_TAB5_SSH_PUBKEY_AUTH
 // main/keys/id_rsa, baked in via EMBED_FILES in main/CMakeLists.txt.
 extern "C" const uint8_t _binary_id_rsa_start[];
@@ -31,7 +33,6 @@ namespace tab5 {
 namespace {
 
 constexpr const char* kTag       = "ssh";
-constexpr const char* kNvsNs     = "ssh_tofu";
 constexpr size_t kTxStreamBytes  = 4096;
 constexpr size_t kRxChunk        = 1024;
 
@@ -149,41 +150,11 @@ void hex32(const uint8_t in[32], char out[65]) {
     out[64] = '\0';
 }
 
-// Returns: 0 ok (match or trusted-on-first-use), -1 mismatch, -2 NVS error.
+// TOFU storage lives in main/tofu.{hpp,cpp}; this function is just a
+// thin alias kept for diff readability against earlier history.
 int tofu_check_or_record(const char* host, uint16_t port,
                          const uint8_t fp[32], bool* first_use_out) {
-    char nvs_key[16];
-    // NVS keys are limited to 15 chars. Compose a short hash of host:port.
-    uint32_t h = 2166136261u;
-    for (const char* p = host; *p; ++p) h = (h ^ static_cast<uint8_t>(*p)) * 16777619u;
-    h ^= port;
-    snprintf(nvs_key, sizeof(nvs_key), "%08lx", static_cast<unsigned long>(h));
-
-    nvs_handle_t nh;
-    esp_err_t err = nvs_open(kNvsNs, NVS_READWRITE, &nh);
-    if (err != ESP_OK) {
-        ESP_LOGE(kTag, "nvs_open(%s) -> %s", kNvsNs, esp_err_to_name(err));
-        return -2;
-    }
-
-    uint8_t stored[32];
-    size_t stored_len = sizeof(stored);
-    err = nvs_get_blob(nh, nvs_key, stored, &stored_len);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        err = nvs_set_blob(nh, nvs_key, fp, 32);
-        if (err == ESP_OK) err = nvs_commit(nh);
-        nvs_close(nh);
-        if (first_use_out) *first_use_out = true;
-        return err == ESP_OK ? 0 : -2;
-    }
-    if (err != ESP_OK || stored_len != 32) {
-        nvs_close(nh);
-        return -2;
-    }
-    nvs_close(nh);
-    if (memcmp(stored, fp, 32) != 0) return -1;
-    if (first_use_out) *first_use_out = false;
-    return 0;
+    return tab5::tofu::check_or_record(host, port, fp, first_use_out);
 }
 
 void ssh_task(void* /*arg*/) {

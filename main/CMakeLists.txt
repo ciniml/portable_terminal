@@ -31,6 +31,7 @@ idf_component_register(
         "reconnect.cpp"
         "ssh_connection.cpp"
         "telnet_connection.cpp"
+        "tofu.cpp"
         "status_bar.cpp"
         "ui_root.cpp"
     INCLUDE_DIRS "."

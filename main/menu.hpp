@@ -15,9 +15,12 @@
 #include <cstdint>
 #include <functional>
 
+#include <vector>
+
 #include "byte_input.hpp"
 #include "input_touch.hpp"
 #include "profiles.hpp"
+#include "tofu.hpp"
 
 namespace tab5 {
 
@@ -66,7 +69,7 @@ private:
         Hidden,
         ProfileList,
         ProfileEditor,
-        // TofuList — step 4
+        TofuList,
     };
 
     State   state_ = State::Hidden;
@@ -89,10 +92,24 @@ private:
     Editor editor_{};
     SoftKeyboard* kbd_ = nullptr;
 
+    // ---- TofuList state ----
+    struct TofuView {
+        std::vector<tofu::Entry> entries;
+        int  pressed_idx;   // row index
+        int  pressed_btn;   // 0 generic / 1 delete
+        bool pressed_back;
+    };
+    TofuView tofu_{};
+
     void render_profile_list();
     void render_profile_editor();
+    void render_tofu_list();
     bool handle_touch_profile_list(const TouchPoint& p);
     bool handle_touch_profile_editor(const TouchPoint& p);
+    bool handle_touch_tofu_list(const TouchPoint& p);
+
+    void open_tofu();
+    void refresh_tofu();
 
     // Hit-test helpers — return -1 if no hit.
     int   hit_row(int y) const;            // y → row index, -1 outside list
@@ -105,6 +122,11 @@ private:
     bool  hit_editor_save(int x, int y) const;
     bool  hit_editor_cancel(int x, int y) const;
     bool  hit_editor_show_pw(int x, int y) const;
+
+    int   hit_tofu_row(int y) const;
+    bool  hit_tofu_delete(int x) const;
+    bool  hit_tofu_back(int x, int y) const;
+    bool  hit_manage_tofu(int x, int y) const;   // on profile list
 };
 
 extern Menu menu;

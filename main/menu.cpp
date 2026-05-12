@@ -62,11 +62,22 @@ constexpr int kDelX    = kRowX + kRowW - kDelW;  // right-aligned, 970
 constexpr int kEditW   = 130;
 constexpr int kEditX   = kDelX - 10 - kEditW;    // 830
 
-// "+ Add new" footer button
+// Footer buttons on ProfileList: [Manage TOFU] | [+ Add new]
 constexpr int kAddW    = 240;
 constexpr int kAddH    = 60;
-constexpr int kAddX    = (kScreenW - kAddW) / 2;
-constexpr int kAddY    = kScreenH - kAddH - 20;
+constexpr int kFooterY = kScreenH - kAddH - 20;
+constexpr int kAddY    = kFooterY;
+// Side-by-side, centred together with a 40-px gap.
+constexpr int kTofuMgrW = 240;
+constexpr int kTofuMgrX = (kScreenW - (kTofuMgrW + 40 + kAddW)) / 2;
+constexpr int kAddX     = kTofuMgrX + kTofuMgrW + 40;
+
+// TofuList layout (re-uses some ProfileList constants for visual
+// consistency).
+constexpr int kTofuRowH   = 70;
+constexpr int kTofuRowY0  = kHeaderH + 10;
+constexpr int kTofuBackX  = 20;
+constexpr int kTofuBackW  = 200;
 
 // Profile editor layout — everything must fit above the soft keyboard
 // panel at y=336.
@@ -155,6 +166,30 @@ bool Menu::hit_edit(int x) const {
 bool Menu::hit_add(int x, int y) const {
     return x >= kAddX && x < kAddX + kAddW &&
            y >= kAddY && y < kAddY + kAddH;
+}
+
+bool Menu::hit_manage_tofu(int x, int y) const {
+    return x >= kTofuMgrX && x < kTofuMgrX + kTofuMgrW &&
+           y >= kFooterY  && y < kFooterY  + kAddH;
+}
+
+int Menu::hit_tofu_row(int y) const {
+    if (y < kTofuRowY0) return -1;
+    int rel = y - kTofuRowY0;
+    int row = rel / (kTofuRowH + kRowGap);
+    int row_top = kTofuRowY0 + row * (kTofuRowH + kRowGap);
+    if (y >= row_top + kTofuRowH) return -1;
+    if (row < 0 || row >= static_cast<int>(tofu_.entries.size())) return -1;
+    return row;
+}
+
+bool Menu::hit_tofu_delete(int x) const {
+    return x >= kDelX && x < kDelX + kDelW;
+}
+
+bool Menu::hit_tofu_back(int x, int y) const {
+    return x >= kTofuBackX && x < kTofuBackX + kTofuBackW &&
+           y >= kFooterY   && y < kFooterY   + kAddH;
 }
 
 int Menu::hit_editor_field(int x, int y) const {
@@ -273,10 +308,80 @@ void Menu::render_profile_list() {
                      kScreenW / 2, kScreenH / 2);
     }
 
-    // Add button
-    bool press_add = (pressed_idx_ == -3);
+    // Footer buttons: [Manage TOFU] | [+ Add new]
+    bool press_add  = (pressed_idx_ == -3);
+    bool press_tofu = (pressed_idx_ == -4);
+    draw_button(kTofuMgrX, kFooterY, kTofuMgrW, kAddH, "Manage TOFU",
+                kEditBg, kEditFg, press_tofu);
     draw_button(kAddX, kAddY, kAddW, kAddH, "+ Add new",
                 kAddBg, kAddFg, press_add);
+}
+
+void Menu::render_tofu_list() {
+    auto& d = M5.Display;
+    d.fillRect(0, 0, kScreenW, kScreenH, kBg);
+
+    // Header
+    d.fillRect(0, 0, kScreenW, kHeaderH, kHeaderBg);
+    d.setTextColor(kHeaderFg, kHeaderBg);
+    d.setTextDatum(middle_left);
+    d.setFont(&fonts::lgfxJapanGothic_28);
+    char title[64];
+    snprintf(title, sizeof(title), "TOFU entries  (%u)",
+             static_cast<unsigned>(tofu_.entries.size()));
+    d.drawString(title, 24, kHeaderH / 2);
+    draw_button(kCloseX, kCloseY, kCloseW, kCloseH, "X",
+                kCloseBg, kHeaderFg, pressed_idx_ == -2);
+
+    // Rows
+    if (tofu_.entries.empty()) {
+        d.setTextColor(kRowFg, kBg);
+        d.setFont(&fonts::lgfxJapanGothic_24);
+        d.setTextDatum(middle_center);
+        d.drawString("No saved fingerprints yet",
+                     kScreenW / 2, kScreenH / 2);
+    }
+    for (size_t i = 0; i < tofu_.entries.size(); ++i) {
+        int y = kTofuRowY0 + static_cast<int>(i) * (kTofuRowH + kRowGap);
+        bool press_del = (tofu_.pressed_idx == static_cast<int>(i) &&
+                          tofu_.pressed_btn == 1);
+
+        uint16_t bg = kRowBg;
+        d.fillRoundRect(kRowX, y, kRowW, kTofuRowH, 10, bg);
+        d.drawRoundRect(kRowX, y, kRowW, kTofuRowH, 10, kRowEdge);
+
+        const auto& e = tofu_.entries[i];
+        char line1[96];
+        if (e.host[0]) {
+            snprintf(line1, sizeof(line1), "%s:%u", e.host, e.port);
+        } else {
+            snprintf(line1, sizeof(line1), "(legacy entry)  key=%s", e.key);
+        }
+        d.setTextColor(kRowFg, bg);
+        d.setFont(&fonts::lgfxJapanGothic_24);
+        d.setTextDatum(top_left);
+        d.drawString(line1, kRowX + 20, y + 8);
+
+        // Fingerprint preview: SHA256:hh:hh:... first 8 hex bytes
+        char fp_line[80];
+        int n = snprintf(fp_line, sizeof(fp_line), "SHA256:");
+        for (int b = 0; b < 16 && n + 3 < (int)sizeof(fp_line); ++b) {
+            n += snprintf(fp_line + n, sizeof(fp_line) - n,
+                          "%02x", e.fp[b]);
+        }
+        if (n + 3 < (int)sizeof(fp_line)) {
+            snprintf(fp_line + n, sizeof(fp_line) - n, "...");
+        }
+        d.setFont(&fonts::lgfxJapanGothic_20);
+        d.drawString(fp_line, kRowX + 20, y + 40);
+
+        draw_button(kDelX + 10, y + 14, kDelW - 20, kTofuRowH - 28,
+                    "Delete", kDangerBg, kDangerFg, press_del);
+    }
+
+    // Back to profiles
+    draw_button(kTofuBackX, kFooterY, kTofuBackW, kAddH, "< Back",
+                kEditBg, kEditFg, tofu_.pressed_back);
 }
 
 namespace {
@@ -390,6 +495,8 @@ void Menu::render() {
         render_profile_list();
     } else if (state_ == State::ProfileEditor) {
         render_profile_editor();
+    } else if (state_ == State::TofuList) {
+        render_tofu_list();
     }
 }
 
@@ -407,6 +514,9 @@ bool Menu::handle_touch(const TouchPoint& p) {
     if (state_ == State::ProfileEditor) {
         return handle_touch_profile_editor(p);
     }
+    if (state_ == State::TofuList) {
+        return handle_touch_tofu_list(p);
+    }
     return handle_touch_profile_list(p);
 }
 
@@ -417,6 +527,8 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             pressed_idx_ = -2;
         } else if (hit_add(p.x, p.y)) {
             pressed_idx_ = -3;
+        } else if (hit_manage_tofu(p.x, p.y)) {
+            pressed_idx_ = -4;
         } else {
             int row = hit_row(p.y);
             if (row >= 0) {
@@ -436,6 +548,9 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             pressed_idx_ = -1;
             render();
         } else if (pressed_idx_ == -3 && !hit_add(p.x, p.y)) {
+            pressed_idx_ = -1;
+            render();
+        } else if (pressed_idx_ == -4 && !hit_manage_tofu(p.x, p.y)) {
             pressed_idx_ = -1;
             render();
         } else if (pressed_idx_ >= 0) {
@@ -462,6 +577,10 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
         }
         if (armed_idx == -3 && hit_add(p.x, p.y)) {
             open_editor(-1);
+            return true;
+        }
+        if (armed_idx == -4 && hit_manage_tofu(p.x, p.y)) {
+            open_tofu();
             return true;
         }
         if (armed_idx >= 0 && hit_row(p.y) == armed_idx) {
@@ -631,6 +750,89 @@ void Menu::close_editor(bool save) {
         state_ = State::ProfileList;
     }
     render();
+}
+
+// ---------- TOFU list ----------
+
+void Menu::refresh_tofu() {
+    tofu::list_entries(tofu_.entries);
+}
+
+void Menu::open_tofu() {
+    refresh_tofu();
+    tofu_.pressed_idx  = -1;
+    tofu_.pressed_btn  = -1;
+    tofu_.pressed_back = false;
+    state_ = State::TofuList;
+    render();
+}
+
+bool Menu::handle_touch_tofu_list(const TouchPoint& p) {
+    if (p.event == TouchEvent::Down) {
+        tofu_.pressed_idx  = -1;
+        tofu_.pressed_btn  = -1;
+        tofu_.pressed_back = false;
+        if (hit_close(p.x, p.y)) {
+            pressed_idx_ = -2;  // share the header X press state
+        } else if (hit_tofu_back(p.x, p.y)) {
+            tofu_.pressed_back = true;
+        } else {
+            int row = hit_tofu_row(p.y);
+            if (row >= 0) {
+                tofu_.pressed_idx = row;
+                tofu_.pressed_btn = hit_tofu_delete(p.x) ? 1 : 0;
+            }
+        }
+        render();
+        return true;
+    }
+    if (p.event == TouchEvent::Move) {
+        if (pressed_idx_ == -2 && !hit_close(p.x, p.y)) {
+            pressed_idx_ = -1; render();
+        }
+        if (tofu_.pressed_back && !hit_tofu_back(p.x, p.y)) {
+            tofu_.pressed_back = false; render();
+        }
+        if (tofu_.pressed_idx >= 0) {
+            int row = hit_tofu_row(p.y);
+            int btn = hit_tofu_delete(p.x) ? 1 : 0;
+            if (row != tofu_.pressed_idx || btn != tofu_.pressed_btn) {
+                tofu_.pressed_idx = -1;
+                render();
+            }
+        }
+        return true;
+    }
+    if (p.event == TouchEvent::Up) {
+        bool armed_back = tofu_.pressed_back;
+        int  armed_idx  = tofu_.pressed_idx;
+        int  armed_btn  = tofu_.pressed_btn;
+        int  armed_x    = pressed_idx_;
+        tofu_.pressed_back = false;
+        tofu_.pressed_idx  = -1;
+        tofu_.pressed_btn  = -1;
+        pressed_idx_ = -1;
+
+        if (armed_x == -2 && hit_close(p.x, p.y)) {
+            close();
+            return true;
+        }
+        if (armed_back && hit_tofu_back(p.x, p.y)) {
+            state_ = State::ProfileList;
+            render();
+            return true;
+        }
+        if (armed_idx >= 0 && hit_tofu_row(p.y) == armed_idx &&
+            armed_btn == 1 && hit_tofu_delete(p.x)) {
+            if (armed_idx < static_cast<int>(tofu_.entries.size())) {
+                tofu::remove_by_key(tofu_.entries[armed_idx].key);
+                refresh_tofu();
+            }
+        }
+        render();
+        return true;
+    }
+    return true;
 }
 
 void Menu::editor_feed(std::span<const uint8_t> bytes) {
