@@ -8,3 +8,7 @@ dependencies:
   # be re-flashed with a matching 2.x slave (see CLAUDE.md).
   espressif/esp_hosted: '^2.12.7'
   espressif/esp_wifi_remote: '^1.5.1'
+  # USB HID host (keyboard / mouse class driver). Used by
+  # main/input_usb_hid.cpp so a regular USB keyboard plugged into the
+  # Tab5 USB-A port acts as another input source.
+  espressif/usb_host_hid: '*'

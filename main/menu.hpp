@@ -70,6 +70,7 @@ private:
         ProfileList,
         ProfileEditor,
         TofuList,
+        WifiEdit,
     };
 
     State   state_ = State::Hidden;
@@ -101,15 +102,35 @@ private:
     };
     TofuView tofu_{};
 
+    // ---- WifiEdit state ----
+    struct WifiView {
+        char     ssid[33];
+        char     psk[64];
+        int      timeout_s;
+        int      focused_field;   // 0=ssid, 1=psk, 2=timeout, -1=none
+        int      pressed_field;
+        bool     pressed_save;
+        bool     pressed_cancel;
+        bool     pressed_show_pw;
+        bool     show_psk;
+        ByteSink saved_sink;
+    };
+    WifiView wifi_{};
+
     void render_profile_list();
     void render_profile_editor();
     void render_tofu_list();
+    void render_wifi_edit();
     bool handle_touch_profile_list(const TouchPoint& p);
     bool handle_touch_profile_editor(const TouchPoint& p);
     bool handle_touch_tofu_list(const TouchPoint& p);
+    bool handle_touch_wifi_edit(const TouchPoint& p);
 
     void open_tofu();
     void refresh_tofu();
+    void open_wifi();
+    void close_wifi(bool save);
+    void wifi_feed(std::span<const uint8_t> bytes);
 
     // Hit-test helpers — return -1 if no hit.
     int   hit_row(int y) const;            // y → row index, -1 outside list
@@ -127,6 +148,12 @@ private:
     bool  hit_tofu_delete(int x) const;
     bool  hit_tofu_back(int x, int y) const;
     bool  hit_manage_tofu(int x, int y) const;   // on profile list
+    bool  hit_manage_wifi(int x, int y) const;   // on profile list
+
+    int   hit_wifi_field(int x, int y) const;
+    bool  hit_wifi_save(int x, int y) const;
+    bool  hit_wifi_cancel(int x, int y) const;
+    bool  hit_wifi_show_pw(int x, int y) const;
 };
 
 extern Menu menu;

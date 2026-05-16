@@ -11,6 +11,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "nvs_flash.h"
 #include "M5Unified.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -22,6 +23,7 @@
 #include "cursor_renderer.hpp"
 #include "display_m5gfx.hpp"
 #include "input_touch.hpp"
+#include "input_usb_hid.hpp"
 #include "input_usb_jtag.hpp"
 #include "menu.hpp"
 #include "soft_keyboard.hpp"
@@ -31,6 +33,7 @@
 #include "input_uart.hpp"
 #endif
 #if CONFIG_TAB5_WIFI_ENABLED
+#include "wifi_config.hpp"
 #include "wifi_setup.hpp"
 #endif
 #include "connection.hpp"
@@ -100,6 +103,19 @@ tab5::ByteSink make_source_sink(TerminalApply&& apply) {
 extern "C" void app_main(void) {
     ESP_LOGI(kTag, "Tab5 terminal — Phase 2 step 3 boot");
 
+    // Initialise the default NVS partition before anything that opens
+    // an NVS namespace (profiles, wifi_config, ssh TOFU). Wi-Fi setup
+    // also calls this later but it's idempotent.
+    {
+        esp_err_t err = nvs_flash_init();
+        if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+            err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            err = nvs_flash_init();
+        }
+        ESP_ERROR_CHECK(err);
+    }
+
     g_mutex = xSemaphoreCreateRecursiveMutex();
 
     static tab5::M5GfxDisplay display(kCols, kRows);
@@ -139,16 +155,15 @@ extern "C" void app_main(void) {
     };
 
 #if CONFIG_TAB5_WIFI_ENABLED
-    {
+    tab5::wifi_config::init();
+    if (tab5::wifi_config::has_credentials()) {
+        auto wc = tab5::wifi_config::get();
         char line[128];
         snprintf(line, sizeof(line),
-                 "\x1b[2mWi-Fi: connecting to %s ...\x1b[0m\r\n",
-                 CONFIG_TAB5_WIFI_SSID);
+                 "\x1b[2mWi-Fi: connecting to %s ...\x1b[0m\r\n", wc.ssid);
         term_write(line);
 
-        auto rc = tab5::wifi_sta_connect(CONFIG_TAB5_WIFI_SSID,
-                                         CONFIG_TAB5_WIFI_PSK,
-                                         CONFIG_TAB5_WIFI_CONNECT_TIMEOUT_S);
+        auto rc = tab5::wifi_sta_connect(wc.ssid, wc.psk, wc.timeout_s);
         if (rc) {
             auto st = tab5::wifi_status();
             uint8_t a = (st.ip4 >>  0) & 0xFF;
@@ -412,6 +427,15 @@ extern "C" void app_main(void) {
     };
     if (auto rc = tab5::start_uart_input(uart_cfg, uart_sink); !rc) {
         ESP_LOGE(kTag, "UART input start failed");
+    }
+#endif
+
+    // USB HID keyboard plugged into the Tab5 USB-A port. Shares the
+    // same byte sink as USB-JTAG so keystrokes go through whichever
+    // input filter / SSH connection the others use.
+#if CONFIG_TAB5_USB_HID_INPUT_ENABLED
+    if (auto rc = tab5::start_usb_hid_input(usb_sink); !rc) {
+        ESP_LOGE(kTag, "USB HID input start failed");
     }
 #endif
 

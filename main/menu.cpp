@@ -12,6 +12,7 @@
 
 #include "profiles.hpp"
 #include "soft_keyboard.hpp"
+#include "wifi_config.hpp"
 
 namespace tab5 {
 
@@ -62,15 +63,18 @@ constexpr int kDelX    = kRowX + kRowW - kDelW;  // right-aligned, 970
 constexpr int kEditW   = 130;
 constexpr int kEditX   = kDelX - 10 - kEditW;    // 830
 
-// Footer buttons on ProfileList: [Manage TOFU] | [+ Add new]
-constexpr int kAddW    = 240;
-constexpr int kAddH    = 60;
-constexpr int kFooterY = kScreenH - kAddH - 20;
-constexpr int kAddY    = kFooterY;
-// Side-by-side, centred together with a 40-px gap.
-constexpr int kTofuMgrW = 240;
-constexpr int kTofuMgrX = (kScreenW - (kTofuMgrW + 40 + kAddW)) / 2;
-constexpr int kAddX     = kTofuMgrX + kTofuMgrW + 40;
+// Footer buttons on ProfileList: [Wi-Fi] | [Manage TOFU] | [+ Add new]
+// Three buttons, 200 px wide each, 30 px gaps, centred.
+constexpr int kAddW     = 200;
+constexpr int kAddH     = 60;
+constexpr int kFooterY  = kScreenH - kAddH - 20;
+constexpr int kAddY     = kFooterY;
+constexpr int kWifiBtnW = 200;
+constexpr int kTofuMgrW = 200;
+constexpr int kFooterTotal = kWifiBtnW + 30 + kTofuMgrW + 30 + kAddW;
+constexpr int kWifiBtnX = (kScreenW - kFooterTotal) / 2;
+constexpr int kTofuMgrX = kWifiBtnX + kWifiBtnW + 30;
+constexpr int kAddX     = kTofuMgrX + kTofuMgrW + 30;
 
 // TofuList layout (re-uses some ProfileList constants for visual
 // consistency).
@@ -171,6 +175,55 @@ bool Menu::hit_add(int x, int y) const {
 bool Menu::hit_manage_tofu(int x, int y) const {
     return x >= kTofuMgrX && x < kTofuMgrX + kTofuMgrW &&
            y >= kFooterY  && y < kFooterY  + kAddH;
+}
+
+bool Menu::hit_manage_wifi(int x, int y) const {
+    return x >= kWifiBtnX && x < kWifiBtnX + kWifiBtnW &&
+           y >= kFooterY  && y < kFooterY  + kAddH;
+}
+
+// Wi-Fi edit form layout. Three fields stacked above the kbd panel.
+namespace {
+constexpr int kWifiHeaderH = 50;
+constexpr int kWifiFormY0  = kWifiHeaderH + 10;
+constexpr int kWifiFieldH  = 50;
+constexpr int kWifiLabelX  = 20;
+constexpr int kWifiLabelW  = 160;
+constexpr int kWifiValueX  = kWifiLabelX + kWifiLabelW + 10;
+constexpr int kWifiValueW  = kScreenW - kWifiValueX - 20;
+constexpr int kWifiBtnY    = kWifiFormY0 + 3 * kWifiFieldH + 10;  // ~230
+constexpr int kWifiBtnH    = 40;
+constexpr int kWifiBtnGapW = 160;
+constexpr int kWifiSaveX   = kScreenW - kWifiBtnGapW - 20;
+constexpr int kWifiCancelX = kWifiSaveX - kWifiBtnGapW - 10;
+constexpr int kWifiShowX   = 20;
+constexpr int kWifiShowW   = 180;
+}  // namespace
+
+int Menu::hit_wifi_field(int x, int y) const {
+    if (x < kWifiValueX || x >= kWifiValueX + kWifiValueW) return -1;
+    int rel = y - kWifiFormY0;
+    if (rel < 0) return -1;
+    int idx = rel / kWifiFieldH;
+    if (idx < 0 || idx > 2) return -1;
+    int row_top = kWifiFormY0 + idx * kWifiFieldH;
+    if (y >= row_top + kWifiFieldH - 4) return -1;
+    return idx;
+}
+
+bool Menu::hit_wifi_save(int x, int y) const {
+    return x >= kWifiSaveX && x < kWifiSaveX + kWifiBtnGapW &&
+           y >= kWifiBtnY  && y < kWifiBtnY  + kWifiBtnH;
+}
+
+bool Menu::hit_wifi_cancel(int x, int y) const {
+    return x >= kWifiCancelX && x < kWifiCancelX + kWifiBtnGapW &&
+           y >= kWifiBtnY    && y < kWifiBtnY    + kWifiBtnH;
+}
+
+bool Menu::hit_wifi_show_pw(int x, int y) const {
+    return x >= kWifiShowX && x < kWifiShowX + kWifiShowW &&
+           y >= kWifiBtnY  && y < kWifiBtnY  + kWifiBtnH;
 }
 
 int Menu::hit_tofu_row(int y) const {
@@ -308,9 +361,12 @@ void Menu::render_profile_list() {
                      kScreenW / 2, kScreenH / 2);
     }
 
-    // Footer buttons: [Manage TOFU] | [+ Add new]
+    // Footer buttons: [Wi-Fi] | [Manage TOFU] | [+ Add new]
     bool press_add  = (pressed_idx_ == -3);
     bool press_tofu = (pressed_idx_ == -4);
+    bool press_wifi = (pressed_idx_ == -5);
+    draw_button(kWifiBtnX, kFooterY, kWifiBtnW, kAddH, "Wi-Fi",
+                kEditBg, kEditFg, press_wifi);
     draw_button(kTofuMgrX, kFooterY, kTofuMgrW, kAddH, "Manage TOFU",
                 kEditBg, kEditFg, press_tofu);
     draw_button(kAddX, kAddY, kAddW, kAddH, "+ Add new",
@@ -382,6 +438,67 @@ void Menu::render_tofu_list() {
     // Back to profiles
     draw_button(kTofuBackX, kFooterY, kTofuBackW, kAddH, "< Back",
                 kEditBg, kEditFg, tofu_.pressed_back);
+}
+
+void Menu::render_wifi_edit() {
+    auto& d = M5.Display;
+    d.fillRect(0, 0, kScreenW, kEditorBottom, kBg);
+
+    // Header
+    d.fillRect(0, 0, kScreenW, kWifiHeaderH, kHeaderBg);
+    d.setTextColor(kHeaderFg, kHeaderBg);
+    d.setTextDatum(middle_left);
+    d.setFont(&fonts::lgfxJapanGothic_24);
+    d.drawString("Wi-Fi", 24, kWifiHeaderH / 2);
+
+    static const char* kLabels[3] = {"SSID", "Password", "Timeout (s)"};
+    for (int i = 0; i < 3; ++i) {
+        int y = kWifiFormY0 + i * kWifiFieldH;
+        bool focused = (i == wifi_.focused_field);
+        bool pressed = (i == wifi_.pressed_field);
+
+        d.setFont(&fonts::lgfxJapanGothic_20);
+        d.setTextColor(kRowFg, kBg);
+        d.setTextDatum(middle_left);
+        d.drawString(kLabels[i], kWifiLabelX, y + kWifiFieldH / 2);
+
+        uint16_t bg = focused ? kFieldBgFocus : kFieldBg;
+        if (pressed) bg = static_cast<uint16_t>((bg >> 1) & 0x7BEF);
+        int box_h = kWifiFieldH - 6;
+        d.fillRoundRect(kWifiValueX, y + 2, kWifiValueW, box_h, 6, bg);
+        d.drawRoundRect(kWifiValueX, y + 2, kWifiValueW, box_h, 6, kRowEdge);
+        d.setTextColor(kRowFg, bg);
+        d.setFont(&fonts::lgfxJapanGothic_24);
+
+        char buf[80];
+        if (i == 0) {
+            snprintf(buf, sizeof(buf), "%s", wifi_.ssid);
+        } else if (i == 1) {
+            if (wifi_.show_psk) {
+                snprintf(buf, sizeof(buf), "%s", wifi_.psk);
+            } else {
+                size_t n = strnlen(wifi_.psk, sizeof(wifi_.psk));
+                if (n > sizeof(buf) - 1) n = sizeof(buf) - 1;
+                memset(buf, '*', n);
+                buf[n] = '\0';
+            }
+        } else {
+            snprintf(buf, sizeof(buf), "%d", wifi_.timeout_s);
+        }
+        if (focused) {
+            size_t l = strnlen(buf, sizeof(buf) - 2);
+            if (l < sizeof(buf) - 2) { buf[l] = '_'; buf[l + 1] = '\0'; }
+        }
+        d.drawString(buf, kWifiValueX + 10, y + kWifiFieldH / 2);
+    }
+
+    draw_button(kWifiShowX, kWifiBtnY, kWifiShowW, kWifiBtnH,
+                wifi_.show_psk ? "Hide pw" : "Show pw",
+                kEditBg, kEditFg, wifi_.pressed_show_pw);
+    draw_button(kWifiCancelX, kWifiBtnY, kWifiBtnGapW, kWifiBtnH, "Cancel",
+                kDangerBg, kDangerFg, wifi_.pressed_cancel);
+    draw_button(kWifiSaveX, kWifiBtnY, kWifiBtnGapW, kWifiBtnH, "Save",
+                kSaveBg, kSaveFg, wifi_.pressed_save);
 }
 
 namespace {
@@ -497,6 +614,8 @@ void Menu::render() {
         render_profile_editor();
     } else if (state_ == State::TofuList) {
         render_tofu_list();
+    } else if (state_ == State::WifiEdit) {
+        render_wifi_edit();
     }
 }
 
@@ -517,6 +636,9 @@ bool Menu::handle_touch(const TouchPoint& p) {
     if (state_ == State::TofuList) {
         return handle_touch_tofu_list(p);
     }
+    if (state_ == State::WifiEdit) {
+        return handle_touch_wifi_edit(p);
+    }
     return handle_touch_profile_list(p);
 }
 
@@ -529,6 +651,8 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             pressed_idx_ = -3;
         } else if (hit_manage_tofu(p.x, p.y)) {
             pressed_idx_ = -4;
+        } else if (hit_manage_wifi(p.x, p.y)) {
+            pressed_idx_ = -5;
         } else {
             int row = hit_row(p.y);
             if (row >= 0) {
@@ -551,6 +675,9 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             pressed_idx_ = -1;
             render();
         } else if (pressed_idx_ == -4 && !hit_manage_tofu(p.x, p.y)) {
+            pressed_idx_ = -1;
+            render();
+        } else if (pressed_idx_ == -5 && !hit_manage_wifi(p.x, p.y)) {
             pressed_idx_ = -1;
             render();
         } else if (pressed_idx_ >= 0) {
@@ -581,6 +708,10 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
         }
         if (armed_idx == -4 && hit_manage_tofu(p.x, p.y)) {
             open_tofu();
+            return true;
+        }
+        if (armed_idx == -5 && hit_manage_wifi(p.x, p.y)) {
+            open_wifi();
             return true;
         }
         if (armed_idx >= 0 && hit_row(p.y) == armed_idx) {
@@ -833,6 +964,154 @@ bool Menu::handle_touch_tofu_list(const TouchPoint& p) {
         return true;
     }
     return true;
+}
+
+// ---------- Wi-Fi edit ----------
+
+void Menu::open_wifi() {
+    if (state_ == State::WifiEdit) return;
+    auto c = wifi_config::get();
+    wifi_ = WifiView{};
+    strncpy(wifi_.ssid, c.ssid, sizeof(wifi_.ssid) - 1);
+    strncpy(wifi_.psk,  c.psk,  sizeof(wifi_.psk)  - 1);
+    wifi_.timeout_s     = c.timeout_s > 0 ? c.timeout_s : 20;
+    wifi_.focused_field = -1;
+    wifi_.pressed_field = -1;
+
+    state_ = State::WifiEdit;
+
+    if (kbd_) {
+        wifi_.saved_sink = kbd_->swap_sink(
+            [](std::span<const uint8_t> b) { tab5::menu.wifi_feed(b); });
+        if (!kbd_->visible()) {
+            kbd_->toggle();
+        } else {
+            render();
+        }
+    } else {
+        render();
+    }
+}
+
+void Menu::close_wifi(bool save) {
+    if (save) {
+        wifi_config::Config c{};
+        strncpy(c.ssid, wifi_.ssid, sizeof(c.ssid) - 1);
+        strncpy(c.psk,  wifi_.psk,  sizeof(c.psk)  - 1);
+        c.timeout_s = wifi_.timeout_s;
+        wifi_config::set(c);
+        ESP_LOGI(kTag, "Wi-Fi saved: ssid='%s' — restart pending", c.ssid);
+    }
+    if (kbd_) {
+        (void)kbd_->swap_sink(std::move(wifi_.saved_sink));
+        state_ = State::ProfileList;
+        if (kbd_->visible()) {
+            kbd_->toggle();
+            if (save) { vTaskDelay(pdMS_TO_TICKS(120)); esp_restart(); }
+            return;
+        }
+    } else {
+        state_ = State::ProfileList;
+    }
+    if (save) { vTaskDelay(pdMS_TO_TICKS(120)); esp_restart(); }
+    render();
+}
+
+bool Menu::handle_touch_wifi_edit(const TouchPoint& p) {
+    if (p.y >= 336) return false;  // kbd panel area passes through
+
+    if (p.event == TouchEvent::Down) {
+        wifi_.pressed_field   = hit_wifi_field(p.x, p.y);
+        wifi_.pressed_save    = hit_wifi_save(p.x, p.y);
+        wifi_.pressed_cancel  = hit_wifi_cancel(p.x, p.y);
+        wifi_.pressed_show_pw = hit_wifi_show_pw(p.x, p.y);
+        render();
+        return true;
+    }
+    if (p.event == TouchEvent::Move) {
+        if (wifi_.pressed_field >= 0 &&
+            hit_wifi_field(p.x, p.y) != wifi_.pressed_field) {
+            wifi_.pressed_field = -1; render();
+        }
+        if (wifi_.pressed_save && !hit_wifi_save(p.x, p.y)) {
+            wifi_.pressed_save = false; render();
+        }
+        if (wifi_.pressed_cancel && !hit_wifi_cancel(p.x, p.y)) {
+            wifi_.pressed_cancel = false; render();
+        }
+        if (wifi_.pressed_show_pw && !hit_wifi_show_pw(p.x, p.y)) {
+            wifi_.pressed_show_pw = false; render();
+        }
+        return true;
+    }
+    if (p.event == TouchEvent::Up) {
+        int armed_field    = wifi_.pressed_field;
+        bool armed_save    = wifi_.pressed_save;
+        bool armed_cancel  = wifi_.pressed_cancel;
+        bool armed_show_pw = wifi_.pressed_show_pw;
+        wifi_.pressed_field   = -1;
+        wifi_.pressed_save    = false;
+        wifi_.pressed_cancel  = false;
+        wifi_.pressed_show_pw = false;
+
+        if (armed_cancel && hit_wifi_cancel(p.x, p.y)) {
+            close_wifi(false); return true;
+        }
+        if (armed_save && hit_wifi_save(p.x, p.y)) {
+            close_wifi(true); return true;
+        }
+        if (armed_show_pw && hit_wifi_show_pw(p.x, p.y)) {
+            wifi_.show_psk = !wifi_.show_psk;
+            render();
+            return true;
+        }
+        if (armed_field >= 0 && hit_wifi_field(p.x, p.y) == armed_field) {
+            wifi_.focused_field = armed_field;
+        }
+        render();
+        return true;
+    }
+    return true;
+}
+
+void Menu::wifi_feed(std::span<const uint8_t> bytes) {
+    if (state_ != State::WifiEdit || wifi_.focused_field < 0) return;
+    int f = wifi_.focused_field;
+    bool changed = false;
+    for (uint8_t b : bytes) {
+        if (b == 0x7F || b == 0x08) {
+            if (f == 2) {
+                if (wifi_.timeout_s > 0) {
+                    wifi_.timeout_s /= 10;
+                    changed = true;
+                }
+            } else {
+                char* buf  = (f == 0) ? wifi_.ssid : wifi_.psk;
+                size_t cap = (f == 0) ? sizeof(wifi_.ssid) : sizeof(wifi_.psk);
+                size_t n   = strnlen(buf, cap);
+                if (n > 0) { buf[n - 1] = '\0'; changed = true; }
+            }
+        } else if (b >= 0x20 && b < 0x7F) {
+            if (f == 2) {
+                if (b < '0' || b > '9') continue;
+                int n = wifi_.timeout_s * 10 + (b - '0');
+                if (n <= 3600) { wifi_.timeout_s = n; changed = true; }
+            } else {
+                char* buf  = (f == 0) ? wifi_.ssid : wifi_.psk;
+                size_t cap = (f == 0) ? sizeof(wifi_.ssid) : sizeof(wifi_.psk);
+                size_t n   = strnlen(buf, cap);
+                if (n + 1 < cap) {
+                    buf[n] = static_cast<char>(b);
+                    buf[n + 1] = '\0';
+                    changed = true;
+                }
+            }
+        } else if (b == 0x1B) {
+            close_wifi(false);
+            return;
+        }
+    }
+    if (changed) render();
 }
 
 void Menu::editor_feed(std::span<const uint8_t> bytes) {

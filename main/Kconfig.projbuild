@@ -50,6 +50,17 @@ menu "Tab5 terminal"
         depends on TAB5_UART_INPUT_ENABLED
         default 115200
 
+    config TAB5_USB_HID_INPUT_ENABLED
+        bool "Enable USB HID keyboard input"
+        default y
+        help
+            When enabled, the app installs the USB host stack and the
+            HID class driver. A USB keyboard plugged into the Tab5
+            USB-A port acts as another byte-input source — its keys
+            flow through the same path as USB-JTAG / UART (cooked
+            filter when no remote connection, or directly to SSH /
+            Telnet when one is up).
+
     menu "Wi-Fi"
 
         config TAB5_WIFI_ENABLED

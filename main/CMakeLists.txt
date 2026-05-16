@@ -23,8 +23,10 @@ idf_component_register(
         "input_usb_jtag.cpp"
         "input_uart.cpp"
         "input_touch.cpp"
+        "input_usb_hid.cpp"
         "menu.cpp"
         "soft_keyboard.cpp"
+        "wifi_config.cpp"
         "wifi_setup.cpp"
         "connection.cpp"
         "profiles.cpp"
@@ -49,6 +51,8 @@ idf_component_register(
         libssh2
         mbedtls
         lwip
+        espressif__usb
+        espressif__usb_host_hid
         # carried for later phases (unused yet):
         wireguard
         tailscale
