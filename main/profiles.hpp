@@ -16,8 +16,9 @@
 namespace tab5 {
 
 enum class ConnProto : uint8_t {
-    SSH    = 0,
-    Telnet = 1,
+    SSH       = 0,
+    Telnet    = 1,
+    UsbSerial = 2,
 };
 
 enum class SshAuth : uint8_t {

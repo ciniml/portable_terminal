@@ -61,6 +61,15 @@ menu "Tab5 terminal"
             filter when no remote connection, or directly to SSH /
             Telnet when one is up).
 
+    config TAB5_USB_SERIAL_BAUD
+        int "USB-serial default baud rate"
+        default 115200
+        range 300 921600
+        help
+            Baud rate for the UsbSerialConnection backend (FTDI host).
+            Used when a profile with proto=UsbSerial is selected. 8N1
+            line format. Per-profile baud is a follow-up.
+
     menu "Wi-Fi"
 
         config TAB5_WIFI_ENABLED

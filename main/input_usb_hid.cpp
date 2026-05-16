@@ -216,37 +216,13 @@ void driver_event_cb(hid_host_device_handle_t hid_dev_handle,
     ESP_LOGI(kTag, "keyboard ready");
 }
 
-void usb_host_task(void*) {
-    for (;;) {
-        uint32_t flags = 0;
-        usb_host_lib_handle_events(portMAX_DELAY, &flags);
-        if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            usb_host_device_free_all();
-        }
-    }
-}
-
 }  // namespace
 
 term::Result<void> start_usb_hid_input(ByteSink sink) {
     g_sink = std::move(sink);
 
-    usb_host_config_t host_cfg{};
-    host_cfg.skip_phy_setup = false;
-    host_cfg.root_port_unpowered = false;
-    host_cfg.intr_flags = ESP_INTR_FLAG_LEVEL1;
-    // peripheral_map = 0 → IDF picks the default OTG peripheral.
-    esp_err_t err = usb_host_install(&host_cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(kTag, "usb_host_install -> %s", esp_err_to_name(err));
-        return std::unexpected(term::Error::NotInitialized);
-    }
-
-    if (xTaskCreate(usb_host_task, "usb_host", 4096, nullptr,
-                    tskIDLE_PRIORITY + 2, nullptr) != pdPASS) {
-        return std::unexpected(term::Error::NotInitialized);
-    }
-
+    // The USB host library is brought up by start_usb_host_root() at
+    // boot; we only register as a class driver here.
     hid_host_driver_config_t hid_cfg = {
         .create_background_task = true,
         .task_priority          = tskIDLE_PRIORITY + 3,
@@ -255,7 +231,7 @@ term::Result<void> start_usb_hid_input(ByteSink sink) {
         .callback               = driver_event_cb,
         .callback_arg           = nullptr,
     };
-    err = hid_host_install(&hid_cfg);
+    esp_err_t err = hid_host_install(&hid_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(kTag, "hid_host_install -> %s", esp_err_to_name(err));
         return std::unexpected(term::Error::NotInitialized);

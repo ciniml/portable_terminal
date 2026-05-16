@@ -288,7 +288,21 @@ void draw_button(int x, int y, int w, int h, const char* label,
 }
 
 const char* proto_label(ConnProto p) {
-    return p == ConnProto::SSH ? "ssh" : "telnet";
+    switch (p) {
+        case ConnProto::SSH:       return "ssh";
+        case ConnProto::Telnet:    return "telnet";
+        case ConnProto::UsbSerial: return "usb-serial";
+    }
+    return "?";
+}
+
+ConnProto next_proto(ConnProto p) {
+    switch (p) {
+        case ConnProto::SSH:       return ConnProto::Telnet;
+        case ConnProto::Telnet:    return ConnProto::UsbSerial;
+        case ConnProto::UsbSerial: return ConnProto::SSH;
+    }
+    return ConnProto::SSH;
 }
 
 }  // namespace
@@ -799,10 +813,7 @@ bool Menu::handle_touch_profile_editor(const TouchPoint& p) {
             // Toggle fields don't take focus — they flip on tap.
             if (kFields[armed_field].kind == FieldKind::Toggle) {
                 if (armed_field == 1) {
-                    editor_.working.proto =
-                        (editor_.working.proto == ConnProto::SSH)
-                            ? ConnProto::Telnet
-                            : ConnProto::SSH;
+                    editor_.working.proto = next_proto(editor_.working.proto);
                 }
                 editor_.focused_field = -1;
             } else {

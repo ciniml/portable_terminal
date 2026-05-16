@@ -26,3 +26,6 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # 3.5 KB IDF default overflows once libssh2 trace is enabled and is
 # uncomfortably tight even without it.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# FTDI USB-Serial host driver (used by UsbSerialConnection).
+CONFIG_USB_HOST_ENABLE_FTDI_SIO_DRIVER=y

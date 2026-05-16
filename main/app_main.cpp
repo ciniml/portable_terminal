@@ -45,6 +45,8 @@
 #if CONFIG_TAB5_TELNET_ENABLED
 #include "telnet_connection.hpp"
 #endif
+#include "usbserial_connection.hpp"
+#include "usb_host_root.hpp"
 #include "term_core/terminal.hpp"
 
 namespace {
@@ -117,6 +119,10 @@ extern "C" void app_main(void) {
     }
 
     g_mutex = xSemaphoreCreateRecursiveMutex();
+
+    // USB host stack must be installed once, before HID / FTDI class
+    // drivers register themselves. Idempotent.
+    (void)tab5::start_usb_host_root();
 
     static tab5::M5GfxDisplay display(kCols, kRows);
     if (!display.init()) {
@@ -213,8 +219,14 @@ extern "C" void app_main(void) {
     tab5::profiles.init();
 
     static std::unique_ptr<tab5::IConnection> conn;
-    if (tab5::wifi_status().connected && tab5::profiles.count() > 0) {
+    if (tab5::profiles.count() > 0) {
         auto pp = tab5::profiles.get(tab5::profiles.selected());
+        // SSH / Telnet need Wi-Fi; USB-serial doesn't.
+        bool need_wifi = pp && (pp->proto == tab5::ConnProto::SSH ||
+                                pp->proto == tab5::ConnProto::Telnet);
+        if (need_wifi && !tab5::wifi_status().connected) {
+            pp = std::nullopt;
+        }
 
         auto remote_rx = [](std::span<const uint8_t> bytes) {
             Lock lk;
@@ -267,6 +279,20 @@ extern "C" void app_main(void) {
             if (c->start(remote_rx)) conn = std::move(c);
         }
 #endif
+        else if (pp && pp->proto == tab5::ConnProto::UsbSerial) {
+            char line[160];
+            snprintf(line, sizeof(line),
+                     "\x1b[2mUSB-serial: opening FTDI ...\x1b[0m\r\n");
+            term_write(line);
+            tab5::UsbSerialConfig ucfg{
+                .baud      = CONFIG_TAB5_USB_SERIAL_BAUD,
+                .data_bits = 8,
+                .stop_bits = 0,   // 1 stop bit
+                .parity    = 0,   // none
+            };
+            auto c = std::make_unique<tab5::UsbSerialConnection>(ucfg);
+            if (c->start(remote_rx)) conn = std::move(c);
+        }
 
         if (conn) {
             char line[160];

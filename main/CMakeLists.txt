@@ -34,6 +34,8 @@ idf_component_register(
         "ssh_connection.cpp"
         "telnet_connection.cpp"
         "tofu.cpp"
+        "usb_host_root.cpp"
+        "usbserial_connection.cpp"
         "status_bar.cpp"
         "ui_root.cpp"
     INCLUDE_DIRS "."
