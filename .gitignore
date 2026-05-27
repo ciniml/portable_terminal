@@ -13,3 +13,5 @@ dependencies.lock
 compile_commands.json
 # SSH keys for CONFIG_TAB5_SSH_PUBKEY_AUTH — never commit private keys.
 main/keys/
+# Captured device logs from `make monitor-log` (and ad-hoc captures).
+logs/

@@ -36,7 +36,12 @@ endif
         build-host test-host clean-host \
         set-target \
         build-docker docker-shell docker-clean \
-        flash flash-monitor monitor erase-flash
+        flash flash-monitor monitor monitor-log erase-flash \
+        size size-components size-files sections bss-top
+
+# Non-interactive log capture window (seconds). Used by monitor-log
+# from CI / agent contexts where idf.py monitor refuses to attach.
+MONITOR_LOG_SECONDS ?= 30
 
 # Track which defaults set generated the current sdkconfig, so we
 # automatically regenerate it when switching between HW and QEMU builds.
@@ -82,6 +87,12 @@ flash:
 monitor:
 	bash -c "source $(IDF_EXPORTS) && idf.py $(IDFPY_PORT) monitor"
 
+# Non-interactive log capture: resets the target via DTR/RTS and reads
+# stdout for MONITOR_LOG_SECONDS seconds. Used by agent harness when
+# idf.py monitor's TTY requirement gets in the way.
+monitor-log:
+	python3 tools/monitor_log.py --port $(if $(PORT),$(PORT),/dev/ttyACM0) --seconds $(MONITOR_LOG_SECONDS)
+
 # Convenience: flash + monitor in a single idf.py invocation (faster than
 # `make flash monitor` because the IDF env is sourced once).
 flash-monitor:
@@ -89,6 +100,28 @@ flash-monitor:
 
 erase-flash:
 	bash -c "source $(IDF_EXPORTS) && idf.py $(IDFPY_PORT) erase-flash"
+
+# Memory usage reports. `size` prints the overall .text/.bss/.rodata
+# breakdown; `size-components` and `size-files` drill into where the
+# bytes come from.
+size:
+	bash -c "source $(IDF_EXPORTS) && idf.py size"
+
+size-components:
+	bash -c "source $(IDF_EXPORTS) && idf.py size-components"
+
+size-files:
+	bash -c "source $(IDF_EXPORTS) && idf.py size-files"
+
+# Print ELF section headers — useful to inspect where .bss / .data /
+# .dram0 actually live in the address map.
+sections:
+	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-objdump -h build/tab5_claude_client.elf"
+
+# List the largest .bss symbols by size — useful when chasing down
+# which component is bloating internal SRAM.
+bss-top:
+	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-nm --size-sort --print-size build/tab5_claude_client.elf 2>/dev/null | grep ' [bB] ' | tail -30"
 
 clean:
 	bash -c "source $(IDF_EXPORTS) && idf.py fullclean"
