@@ -121,7 +121,9 @@ static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct
 			uint8_t buf[1500];
 			u16_t len = q->tot_len;
 			if (len <= sizeof(buf) && pbuf_copy_partial(q, buf, len, 0) == len) {
-				s_derp_output_fn(peer->public_key, buf, len);
+				/* peer->port carries the peer's home DERP region for
+				 * 127.3.3.40:<region> pseudo endpoints. */
+				s_derp_output_fn(peer->public_key, buf, len, (int)peer->port);
 			}
 			return ERR_OK;
 		}
@@ -716,7 +718,7 @@ static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_pee
 	pbuf = wireguardif_initiate_handshake(device, peer, &msg, &result);
 	if (pbuf) {
 		result = wireguardif_peer_output(netif, pbuf, peer);
-		ESP_LOGI(TAG, "start handshake to %u.%u.%u.%u:%u -> %d",
+		ESP_LOGD(TAG, "start handshake to %u.%u.%u.%u:%u -> %d",
 		         (peer->ip.u_addr.ip4.addr      ) & 0xff,
 		         (peer->ip.u_addr.ip4.addr >>  8) & 0xff,
 		         (peer->ip.u_addr.ip4.addr >> 16) & 0xff,

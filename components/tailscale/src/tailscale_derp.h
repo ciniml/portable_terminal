@@ -54,15 +54,20 @@ esp_err_t ts_derp_connect(const ts_derp_node_t *node,
 /**
  * @brief Send a WireGuard packet to a peer via DERP.
  *
- * Wraps the packet in a DERP SendPacket frame and writes it to the TLS
- * connection.  Thread-safe (uses an internal mutex).
+ * Wraps the packet in a DERP SendPacket frame and enqueues it on the TLS
+ * connection serving @p region. DERP does not forward packets across
+ * regions, so the packet must go out via the peer's home region; a
+ * connection to that region is opened on demand (the first packets are
+ * dropped while it comes up — WireGuard retransmits). Thread-safe.
  *
+ * @param region    Peer's home DERP region ID (<=0 falls back to our home).
  * @param dst_pub   Destination peer public key (32 bytes).
  * @param pkt       WireGuard packet payload.
  * @param pkt_len   Payload length in bytes.
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if not connected.
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the region's
+ *         connection is not yet ready.
  */
-esp_err_t ts_derp_send(const uint8_t dst_pub[32],
+esp_err_t ts_derp_send(int region, const uint8_t dst_pub[32],
                        const uint8_t *pkt, size_t pkt_len);
 
 /**
@@ -86,6 +91,8 @@ esp_err_t ts_derp_set_home(const ts_derp_node_t *node,
  *
  * Signature matches wireguard_derp_output_fn in wireguard_esp32.h.
  * Register via wireguard_esp32_set_derp_output(ts_derp_send_packet).
+ *
+ * @param region  Peer's home DERP region (from the WG peer pseudo-endpoint port).
  */
 void ts_derp_send_packet(const uint8_t *peer_pub,
-                         const uint8_t *pkt, size_t pkt_len);
+                         const uint8_t *pkt, size_t pkt_len, int region);

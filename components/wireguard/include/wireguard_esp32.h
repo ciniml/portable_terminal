@@ -163,9 +163,13 @@ esp_err_t wireguard_esp32_get_privkey(uint8_t privkey_out[32]);
  * @param peer_pub  32-byte peer public key (identifies the DERP destination).
  * @param pkt       Encrypted WireGuard packet payload.
  * @param pkt_len   Length of packet.
+ * @param region    Peer's home DERP region — carried in the peer's pseudo
+ *                  endpoint port (127.3.3.40:<region>). DERP doesn't forward
+ *                  across regions, so the relay connection is chosen by it.
  */
 typedef void (*wireguard_derp_output_fn)(const uint8_t *peer_pub,
-                                         const uint8_t *pkt, size_t pkt_len);
+                                         const uint8_t *pkt, size_t pkt_len,
+                                         int region);
 
 /**
  * @brief Register a DERP output callback for routing packets to DERP-only peers.

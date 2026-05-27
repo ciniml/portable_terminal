@@ -58,3 +58,15 @@ void ts_netmap_get_self_ip(char *ip_str, size_t ip_str_len);
  * @return true on hit, false on miss.
  */
 bool ts_netmap_resolve(const char *name, char *ip_str, size_t ip_str_len);
+
+/**
+ * @brief Look up a DERP region's node descriptor by region ID.
+ *
+ * The full DERPMap region table is captured on each MapResponse so the
+ * DERP client can open a connection to any peer's home region.
+ *
+ * @param region_id  Tailscale DERP region ID (> 0).
+ * @param out        Filled with the region's node on success.
+ * @return true if the region is known, false otherwise.
+ */
+bool ts_netmap_get_derp_region(int region_id, ts_derp_node_t *out);

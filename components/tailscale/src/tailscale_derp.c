@@ -12,6 +12,7 @@
 #include "crypto/refc/poly1305-donna.h"
 
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_tls.h"
 #include "esp_crt_bundle.h"
@@ -57,42 +58,58 @@ typedef struct {
     uint8_t  payload[];      /* flexible array; allocated as one block */
 } derp_tx_item_t;
 
-static esp_tls_t         *s_tls = NULL;
-static SemaphoreHandle_t  s_tx_mutex = NULL;
-static QueueHandle_t      s_tx_queue = NULL;
-static TaskHandle_t       s_recv_task = NULL;
-static TaskHandle_t       s_ka_task = NULL;
-static TaskHandle_t       s_tx_task = NULL;
-static bool               s_running = false;
+/* One DERP relay connection. The home region carries inbound traffic
+ * (peers reach us via our home region); additional regions are opened
+ * on demand so we can *send* to peers homed on other regions, since
+ * DERP does not forward packets across regions. */
+typedef struct {
+    bool              in_use;
+    int               region_id;
+    esp_tls_t        *tls;
+    SemaphoreHandle_t tx_mutex;
+    QueueHandle_t     tx_queue;
+    TaskHandle_t      recv_task;
+    TaskHandle_t      ka_task;
+    TaskHandle_t      tx_task;
+    volatile bool     running;
+    volatile bool     connecting;
+    ts_derp_node_t    node;
+} derp_conn_t;
+
+#define DERP_MAX_CONNS 4
+static derp_conn_t s_conns[DERP_MAX_CONNS];
+static SemaphoreHandle_t s_pool_mutex = NULL;
+
+/* Shared identity (same for every region connection). */
 static uint8_t            s_node_pub[32];
-static volatile bool      s_connecting = false;  /* guard against double-spawn */
-
-/* Saved home node for reconnect */
-static ts_derp_node_t     s_home_node;
 static uint8_t            s_node_priv_saved[32];
+static int                s_home_region = 0;
+
+/* Look up the resolver in netmap for a region's node descriptor. */
+extern bool ts_netmap_get_derp_region(int region_id, ts_derp_node_t *out);
 
 /* ------------------------------------------------------------------ */
-/* TLS helpers                                                          */
+/* TLS helpers (operate on one connection)                              */
 /* ------------------------------------------------------------------ */
 
-static int derp_tls_write(const uint8_t *buf, size_t len)
+static int derp_tls_write(derp_conn_t *c, const uint8_t *buf, size_t len)
 {
-    if (!s_tls) return -1;
+    if (!c || !c->tls) return -1;
     size_t written = 0;
     while (written < len) {
-        int n = esp_tls_conn_write(s_tls, buf + written, len - written);
+        int n = esp_tls_conn_write(c->tls, buf + written, len - written);
         if (n <= 0) return -1;
         written += (size_t)n;
     }
     return (int)written;
 }
 
-static int derp_tls_read(uint8_t *buf, size_t len)
+static int derp_tls_read(derp_conn_t *c, uint8_t *buf, size_t len)
 {
-    if (!s_tls) return -1;
+    if (!c || !c->tls) return -1;
     size_t rd = 0;
     while (rd < len) {
-        int n = esp_tls_conn_read(s_tls, buf + rd, len - rd);
+        int n = esp_tls_conn_read(c->tls, buf + rd, len - rd);
         if (n <= 0) return -1;
         rd += (size_t)n;
     }
@@ -243,7 +260,7 @@ static void nacl_box_seal(const uint8_t shared[32],     /* X25519 shared secret 
 /* Frame format: [1-byte frame type][4-byte BE payload length][payload] */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t derp_send_frame(uint8_t frame_type,
+static esp_err_t derp_send_frame(derp_conn_t *c, uint8_t frame_type,
                                  const uint8_t *payload, size_t plen)
 {
     uint8_t hdr[5];
@@ -252,16 +269,17 @@ static esp_err_t derp_send_frame(uint8_t frame_type,
     hdr[2] = (uint8_t)((plen >> 16) & 0xff);
     hdr[3] = (uint8_t)((plen >>  8) & 0xff);
     hdr[4] = (uint8_t)( plen        & 0xff);
-    if (derp_tls_write(hdr, 5) != 5) return ESP_FAIL;
-    if (plen > 0 && derp_tls_write(payload, plen) != (int)plen) return ESP_FAIL;
+    if (derp_tls_write(c, hdr, 5) != 5) return ESP_FAIL;
+    if (plen > 0 && derp_tls_write(c, payload, plen) != (int)plen) return ESP_FAIL;
     return ESP_OK;
 }
 
-static esp_err_t derp_read_frame(uint8_t *type_out, uint8_t *buf, uint32_t buf_max,
-                                  uint32_t *plen_out)
+static esp_err_t derp_read_frame(derp_conn_t *c, uint8_t *type_out,
+                                 uint8_t *buf, uint32_t buf_max,
+                                 uint32_t *plen_out)
 {
     uint8_t hdr[5];
-    if (derp_tls_read(hdr, 5) != 5) return ESP_FAIL;
+    if (derp_tls_read(c, hdr, 5) != 5) return ESP_FAIL;
     *type_out = hdr[0];
     uint32_t plen = ((uint32_t)hdr[1] << 24) | ((uint32_t)hdr[2] << 16)
                   | ((uint32_t)hdr[3] <<  8) |  (uint32_t)hdr[4];
@@ -272,12 +290,12 @@ static esp_err_t derp_read_frame(uint8_t *type_out, uint8_t *buf, uint32_t buf_m
         uint32_t rem = plen;
         while (rem > 0) {
             uint32_t n = rem < sizeof(drain) ? rem : sizeof(drain);
-            derp_tls_read(drain, n);
+            derp_tls_read(c, drain, n);
             rem -= n;
         }
         return ESP_OK; /* Caller checks *type_out and *plen_out */
     }
-    if (plen > 0 && derp_tls_read(buf, plen) != (int)plen) return ESP_FAIL;
+    if (plen > 0 && derp_tls_read(c, buf, plen) != (int)plen) return ESP_FAIL;
     return ESP_OK;
 }
 
@@ -285,7 +303,7 @@ static esp_err_t derp_read_frame(uint8_t *type_out, uint8_t *buf, uint32_t buf_m
 /* HTTP upgrade to DERP                                                */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
+static esp_err_t derp_http_upgrade(derp_conn_t *c, const uint8_t node_priv[32])
 {
     char req[512];
     snprintf(req, sizeof(req),
@@ -295,25 +313,25 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
              "Upgrade: DERP\r\n"
              "Tailscale-Version: 1.56.0\r\n"
              "\r\n",
-             s_home_node.hostname);
+             c->node.hostname);
 
-    if (derp_tls_write((const uint8_t *)req, strlen(req)) < 0) return ESP_FAIL;
+    if (derp_tls_write(c, (const uint8_t *)req, strlen(req)) < 0) return ESP_FAIL;
 
     /* Read until blank line (HTTP/1.1 101 response) */
     char line[256];
     int  llen = 0;
     bool switched = false;
     while (1) {
-        uint8_t c;
-        if (derp_tls_read(&c, 1) != 1) return ESP_FAIL;
-        if (c == '\r') continue;
-        if (c == '\n') {
+        uint8_t ch;
+        if (derp_tls_read(c, &ch, 1) != 1) return ESP_FAIL;
+        if (ch == '\r') continue;
+        if (ch == '\n') {
             line[llen] = '\0';
             if (llen == 0) break;
             if (!switched && strstr(line, "101")) switched = true;
             llen = 0;
         } else {
-            if (llen < (int)sizeof(line) - 1) line[llen++] = (char)c;
+            if (llen < (int)sizeof(line) - 1) line[llen++] = (char)ch;
         }
     }
     if (!switched) {
@@ -324,10 +342,12 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
     /*
      * Step 1: read ServerKey frame (type=0x01).
      * Payload = 8-byte magic "DERP\xF0\x9F\x94\x91" + 32-byte server X25519 pub key.
+     * Scratch buffers are stack-local (not static) so concurrent connect
+     * tasks for different regions don't clobber each other.
      */
-    static uint8_t srv_key_buf[128];
+    uint8_t srv_key_buf[128];
     uint8_t ftype; uint32_t fplen;
-    if (derp_read_frame(&ftype, srv_key_buf, sizeof(srv_key_buf), &fplen) != ESP_OK) {
+    if (derp_read_frame(c, &ftype, srv_key_buf, sizeof(srv_key_buf), &fplen) != ESP_OK) {
         ESP_LOGE(TAG, "DERP: read ServerKey frame failed");
         return ESP_FAIL;
     }
@@ -337,7 +357,7 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
         return ESP_FAIL;
     }
     const uint8_t *srv_pub = srv_key_buf + 8;  /* skip 8-byte magic prefix */
-    ESP_LOGI(TAG, "DERP ServerKey received (fplen=%"PRIu32
+    ESP_LOGD(TAG, "DERP ServerKey received (fplen=%"PRIu32
              " magic=%02x%02x%02x%02x srv=%02x%02x%02x%02x...)",
              fplen,
              srv_key_buf[0], srv_key_buf[1], srv_key_buf[2], srv_key_buf[3],
@@ -359,26 +379,26 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
     size_t ci_pt_len = strlen(CLIENT_INFO_JSON);
     /* Output: 24 (nonce) + 16 (tag) + ci_pt_len */
     size_t box_len = 24 + 16 + ci_pt_len;
-    static uint8_t client_info_msg[32 + 24 + 16 + 32]; /* node_pub + box (generous) */
+    uint8_t client_info_msg[32 + 24 + 16 + 32]; /* node_pub + box (generous) */
     memcpy(client_info_msg, s_node_pub, 32);
     nacl_box_seal(shared, zero_nonce,
                   (const uint8_t *)CLIENT_INFO_JSON, ci_pt_len,
                   client_info_msg + 32);
     memset(shared, 0, 32);
 
-    ESP_LOGI(TAG, "DERP ClientInfo: node_pub=%02x%02x%02x%02x tag=%02x%02x%02x%02x",
+    ESP_LOGD(TAG, "DERP ClientInfo: node_pub=%02x%02x%02x%02x tag=%02x%02x%02x%02x",
              client_info_msg[0], client_info_msg[1],
              client_info_msg[2], client_info_msg[3],
              client_info_msg[56], client_info_msg[57],  /* tag bytes (at offset 32+24) */
              client_info_msg[58], client_info_msg[59]);
 
-    esp_err_t err = derp_send_frame(DERP_FRAME_CLIENT_INFO,
+    esp_err_t err = derp_send_frame(c, DERP_FRAME_CLIENT_INFO,
                                     client_info_msg, 32 + box_len);
     if (err != ESP_OK) return err;
 
     /* Step 3: read ServerInfo frame (type=0x03) */
     uint8_t info_buf[256];
-    if (derp_read_frame(&ftype, info_buf, sizeof(info_buf), &fplen) != ESP_OK) {
+    if (derp_read_frame(c, &ftype, info_buf, sizeof(info_buf), &fplen) != ESP_OK) {
         ESP_LOGE(TAG, "DERP: read ServerInfo frame failed (connection closed?)");
         return ESP_FAIL;
     }
@@ -391,7 +411,8 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "DERP connected to %s", s_home_node.hostname);
+    ESP_LOGI(TAG, "DERP connected to %s (region %d)",
+             c->node.hostname, c->region_id);
     return ESP_OK;
 }
 
@@ -400,24 +421,38 @@ static esp_err_t derp_http_upgrade(const uint8_t node_priv[32])
 /* ------------------------------------------------------------------ */
 
 /* Forward declaration — injects raw WireGuard packet into the WG netif */
-static void inject_wg_packet(const uint8_t *data, size_t len);
+static void inject_wg_packet(int region_id, const uint8_t *data, size_t len);
 
 static void derp_recv_task(void *arg)
 {
-    static EXT_RAM_BSS_ATTR uint8_t frame_buf[DERP_MAX_FRAME];
+    derp_conn_t *c = (derp_conn_t *)arg;
 
-    while (s_running) {
+    /* Per-task frame buffer in PSRAM. A single shared static buffer would
+     * race once more than one region connection runs a recv task. */
+    uint8_t *frame_buf = heap_caps_malloc(DERP_MAX_FRAME, MALLOC_CAP_SPIRAM);
+    if (!frame_buf) frame_buf = malloc(DERP_MAX_FRAME);
+    if (!frame_buf) {
+        ESP_LOGE(TAG, "DERP recv: frame buffer alloc failed (region %d)",
+                 c->region_id);
+        c->running = false;
+        c->recv_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    while (c->running) {
         uint8_t frame_type; uint32_t payload_len;
-        esp_err_t rc = derp_read_frame(&frame_type, frame_buf,
-                                        sizeof(frame_buf), &payload_len);
+        esp_err_t rc = derp_read_frame(c, &frame_type, frame_buf,
+                                       DERP_MAX_FRAME, &payload_len);
         if (rc != ESP_OK) {
-            if (!s_running) break;
+            if (!c->running) break;
             /* SO_RCVTIMEO timeout (EAGAIN/EWOULDBLOCK): not a real error */
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            ESP_LOGW(TAG, "DERP recv error (errno=%d) — disconnecting", errno);
+            ESP_LOGW(TAG, "DERP recv error (region %d errno=%d) — disconnecting",
+                     c->region_id, errno);
             break;
         }
-        if (payload_len > sizeof(frame_buf)) continue; /* oversized, already drained */
+        if (payload_len > DERP_MAX_FRAME) continue; /* oversized, already drained */
 
         switch (frame_type) {
         case DERP_FRAME_RECV_PACKET:
@@ -425,7 +460,7 @@ static void derp_recv_task(void *arg)
                      frame_buf[0], frame_buf[1], frame_buf[2], frame_buf[3],
                      payload_len - 32);
             if (payload_len > 32)
-                inject_wg_packet(frame_buf + 32, payload_len - 32);
+                inject_wg_packet(c->region_id, frame_buf + 32, payload_len - 32);
             break;
         case DERP_FRAME_KEEP_ALIVE:
             break;
@@ -439,25 +474,27 @@ static void derp_recv_task(void *arg)
         }
     }
 
-    s_running = false;
+    free(frame_buf);
+    c->running = false;
+    c->recv_task = NULL;
     vTaskDelete(NULL);
 }
 
 /* Allocate and post one frame to the TX queue. Caller may be on any thread,
  * including the lwIP core-locked path — the actual TLS write happens later
  * on derp_tx_task so we never block the tcpip thread on socket I/O. */
-static esp_err_t derp_tx_enqueue(uint8_t frame_type,
-                                  const uint8_t *payload, size_t plen)
+static esp_err_t derp_tx_enqueue(derp_conn_t *c, uint8_t frame_type,
+                                 const uint8_t *payload, size_t plen)
 {
-    if (!s_tx_queue) return ESP_ERR_INVALID_STATE;
+    if (!c || !c->tx_queue) return ESP_ERR_INVALID_STATE;
     derp_tx_item_t *item = malloc(sizeof(*item) + plen);
     if (!item) return ESP_ERR_NO_MEM;
     item->frame_type = frame_type;
     item->plen       = (uint32_t)plen;
     if (plen && payload) memcpy(item->payload, payload, plen);
-    if (xQueueSend(s_tx_queue, &item, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "DERP TX queue full; dropping frame type=0x%02x",
-                 frame_type);
+    if (xQueueSend(c->tx_queue, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "DERP TX queue full (region %d); dropping frame type=0x%02x",
+                 c->region_id, frame_type);
         free(item);
         return ESP_ERR_NO_MEM;
     }
@@ -465,36 +502,40 @@ static esp_err_t derp_tx_enqueue(uint8_t frame_type,
 }
 
 /* TX worker: serialised TLS writer. Pulls items off the queue and writes
- * them to the DERP TLS connection under s_tx_mutex. */
+ * them to this connection's TLS link under c->tx_mutex. */
 static void derp_tx_task(void *arg)
 {
-    while (s_running) {
+    derp_conn_t *c = (derp_conn_t *)arg;
+    while (c->running) {
         derp_tx_item_t *item = NULL;
-        if (xQueueReceive(s_tx_queue, &item, pdMS_TO_TICKS(500)) != pdTRUE)
+        if (xQueueReceive(c->tx_queue, &item, pdMS_TO_TICKS(500)) != pdTRUE)
             continue;
-        if (!s_running) { free(item); break; }
-        if (!s_tls)     { free(item); continue; }
+        if (!c->running) { free(item); break; }
+        if (!c->tls)     { free(item); continue; }
 
-        xSemaphoreTake(s_tx_mutex, portMAX_DELAY);
-        derp_send_frame(item->frame_type, item->payload, item->plen);
-        xSemaphoreGive(s_tx_mutex);
+        xSemaphoreTake(c->tx_mutex, portMAX_DELAY);
+        derp_send_frame(c, item->frame_type, item->payload, item->plen);
+        xSemaphoreGive(c->tx_mutex);
         free(item);
     }
     /* Drain any remaining items. */
     derp_tx_item_t *item;
-    while (s_tx_queue && xQueueReceive(s_tx_queue, &item, 0) == pdTRUE)
+    while (c->tx_queue && xQueueReceive(c->tx_queue, &item, 0) == pdTRUE)
         free(item);
+    c->tx_task = NULL;
     vTaskDelete(NULL);
 }
 
 /* Keepalive task: enqueues a keepalive frame every DERP_KEEPALIVE_MS. */
 static void derp_ka_task(void *arg)
 {
-    while (s_running) {
+    derp_conn_t *c = (derp_conn_t *)arg;
+    while (c->running) {
         vTaskDelay(pdMS_TO_TICKS(DERP_KEEPALIVE_MS));
-        if (!s_running || !s_tls) break;
-        derp_tx_enqueue(DERP_FRAME_KEEP_ALIVE, NULL, 0);
+        if (!c->running || !c->tls) break;
+        derp_tx_enqueue(c, DERP_FRAME_KEEP_ALIVE, NULL, 0);
     }
+    c->ka_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -514,7 +555,7 @@ extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
                                     struct pbuf *p, const ip_addr_t *addr,
                                     u16_t port);
 
-static void inject_wg_packet(const uint8_t *data, size_t len)
+static void inject_wg_packet(int region_id, const uint8_t *data, size_t len)
 {
     extern struct netif *netif_list;
 
@@ -535,11 +576,14 @@ static void inject_wg_packet(const uint8_t *data, size_t len)
     }
     memcpy(p->payload, data, len);
 
+    /* Synthesise the source endpoint as 127.3.3.40:<region> so the WG
+     * output hook routes replies back out via the DERP connection for the
+     * region the packet arrived on. */
     ip_addr_t src_ip;
     ip4_addr_t src4;
     ip4addr_aton("127.3.3.40", &src4);
     ip_addr_copy_from_ip4(src_ip, src4);
-    u16_t src_port = (u16_t)(s_home_node.region_id > 0 ? s_home_node.region_id : 1);
+    u16_t src_port = (u16_t)(region_id > 0 ? region_id : 1);
 
     ESP_LOGD(TAG, "inject_wg: type=0x%02x len=%u to wg-netif",
              data[0], (unsigned)len);
@@ -547,10 +591,226 @@ static void inject_wg_packet(const uint8_t *data, size_t len)
     /* Call WG receive directly from the DERP recv task. Thread-safety note:
      * lwIP normally requires API access on the tcpip thread, but we sidestep
      * that here because (a) the WG netif's only inbound source IS this
-     * task, (b) outbound encryption goes through the same TLS connection
-     * which is serialized with s_tx_mutex. ICMP exchange across threads is
-     * stateless enough that direct call works in practice. */
+     * task, (b) outbound encryption goes through a TLS connection whose
+     * writes are serialized by that connection's tx_mutex. ICMP exchange
+     * across threads is stateless enough that direct call works in practice. */
     wireguardif_network_rx(nif->state, NULL, p, &src_ip, src_port);
+}
+
+/* ------------------------------------------------------------------ */
+/* Connection pool plumbing                                             */
+/* ------------------------------------------------------------------ */
+
+static void derp_pool_init_once(void)
+{
+    if (!s_pool_mutex) s_pool_mutex = xSemaphoreCreateMutex();
+}
+
+/* Free the per-connection FreeRTOS objects. Call only after the conn's
+ * tasks have exited (running cleared + a settle delay). */
+static void derp_conn_free_resources(derp_conn_t *c)
+{
+    if (c->tx_queue) {
+        derp_tx_item_t *item;
+        while (xQueueReceive(c->tx_queue, &item, 0) == pdTRUE) free(item);
+        vQueueDelete(c->tx_queue);
+        c->tx_queue = NULL;
+    }
+    if (c->tx_mutex) {
+        vSemaphoreDelete(c->tx_mutex);
+        c->tx_mutex = NULL;
+    }
+    c->recv_task = NULL;
+    c->ka_task   = NULL;
+    c->tx_task   = NULL;
+}
+
+/* Tear down a connection's TLS link and tasks. Blocks (~100 ms) — must run
+ * off the tcpip thread. Leaves c->in_use / c->region_id for the caller. */
+static void derp_conn_teardown(derp_conn_t *c)
+{
+    c->running = false;
+    if (c->tls) {
+        esp_tls_conn_destroy(c->tls);
+        c->tls = NULL;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));   /* let recv/ka/tx tasks observe !running */
+    derp_conn_free_resources(c);
+}
+
+/* Open one DERP connection (blocking). Runs on a connect task, never on the
+ * tcpip thread. Uses the shared node identity. Returns ESP_OK with tasks
+ * running, or an error with the TLS link torn down. */
+static esp_err_t derp_conn_open(derp_conn_t *c, const ts_derp_node_t *node)
+{
+    c->node      = *node;
+    c->region_id = node->region_id;
+
+    ESP_LOGI(TAG, "DERP: connecting to %s:%d region %d (heap_free=%u)",
+             node->hostname, node->derp_port, node->region_id,
+             (unsigned)esp_get_free_heap_size());
+
+    esp_tls_cfg_t cfg = {
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .non_block         = false,
+        .timeout_ms        = 60000,   /* cert chain verification on real-HW
+                                       * P4 + concurrent control-TLS load can
+                                       * exceed 20s; give ample headroom. */
+    };
+    c->tls = esp_tls_init();
+    if (!c->tls) {
+        ESP_LOGE(TAG, "esp_tls_init failed");
+        return ESP_ERR_NO_MEM;
+    }
+    int ret = esp_tls_conn_new_sync(node->hostname,
+                                    (int)strlen(node->hostname),
+                                    (int)node->derp_port, &cfg, c->tls);
+    if (ret != 1) {
+        int mb_err = 0, flags = 0;
+        esp_tls_get_and_clear_last_error(&((esp_tls_last_error_t){0}),
+                                         &mb_err, &flags);
+        ESP_LOGE(TAG, "TLS connect to DERP %s failed: ret=%d mbedtls=-0x%04x flags=0x%x heap=%u",
+                 node->hostname, ret, -mb_err, flags,
+                 (unsigned)esp_get_free_heap_size());
+        esp_tls_conn_destroy(c->tls);
+        c->tls = NULL;
+        return ESP_FAIL;
+    }
+
+    if (!c->tx_mutex) c->tx_mutex = xSemaphoreCreateMutex();
+    if (!c->tx_queue) c->tx_queue = xQueueCreate(DERP_TX_QUEUE_LEN,
+                                                 sizeof(derp_tx_item_t *));
+
+    esp_err_t err = derp_http_upgrade(c, s_node_priv_saved);
+    if (err != ESP_OK) {
+        esp_tls_conn_destroy(c->tls);
+        c->tls = NULL;
+        return err;
+    }
+
+    /* Set receive timeout so recv_task can wake up and send keepalives. */
+    int sockfd = -1;
+    if (esp_tls_get_conn_sockfd(c->tls, &sockfd) == ESP_OK && sockfd >= 0) {
+        struct timeval tv = {
+            .tv_sec  = DERP_RECV_TIMEOUT_MS / 1000,
+            .tv_usec = (DERP_RECV_TIMEOUT_MS % 1000) * 1000,
+        };
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    c->running = true;
+    xTaskCreate(derp_recv_task, "ts_derp_rx", DERP_RECV_TASK_STACK,
+                c, DERP_RECV_TASK_PRIO, &c->recv_task);
+    xTaskCreate(derp_ka_task, "ts_derp_ka", DERP_KA_TASK_STACK,
+                c, DERP_KA_TASK_PRIO, &c->ka_task);
+    xTaskCreate(derp_tx_task, "ts_derp_tx", DERP_TX_TASK_STACK,
+                c, DERP_TX_TASK_PRIO, &c->tx_task);
+
+    return ESP_OK;
+}
+
+/* Connect task — opens (or re-opens) the connection in slot @p arg for its
+ * region_id, then clears the connecting flag. Spawned by derp_ensure_region. */
+static void derp_connect_task(void *arg)
+{
+    derp_conn_t *c = (derp_conn_t *)arg;
+    int region = c->region_id;
+
+    /* Reap any stale link from a previous (now-dead) incarnation. */
+    if (c->tls || c->tx_queue || c->tx_mutex) {
+        derp_conn_teardown(c);
+    }
+
+    ts_derp_node_t node;
+    esp_err_t err;
+    if (!ts_netmap_get_derp_region(region, &node)) {
+        ESP_LOGW(TAG, "DERP: region %d unknown — cannot connect", region);
+        err = ESP_ERR_NOT_FOUND;
+    } else {
+        err = derp_conn_open(c, &node);
+    }
+
+    xSemaphoreTake(s_pool_mutex, portMAX_DELAY);
+    if (err != ESP_OK) {
+        c->in_use = false;   /* release the slot for a future retry */
+    }
+    c->connecting = false;
+    xSemaphoreGive(s_pool_mutex);
+    vTaskDelete(NULL);
+}
+
+/* Find the slot serving @p region (in_use), or NULL. Caller holds the pool
+ * mutex. */
+static derp_conn_t *derp_find_region(int region)
+{
+    for (int i = 0; i < DERP_MAX_CONNS; i++)
+        if (s_conns[i].in_use && s_conns[i].region_id == region)
+            return &s_conns[i];
+    return NULL;
+}
+
+/* Reserve a free slot for @p region (marks in_use + connecting). Caller holds
+ * the pool mutex. Returns NULL if the pool is full. */
+static derp_conn_t *derp_reserve_slot(int region)
+{
+    for (int i = 0; i < DERP_MAX_CONNS; i++) {
+        if (!s_conns[i].in_use) {
+            derp_conn_t *c = &s_conns[i];
+            c->in_use     = true;
+            c->connecting = true;
+            c->region_id  = region;
+            c->running    = false;
+            c->tls        = NULL;
+            return c;
+        }
+    }
+    return NULL;
+}
+
+/* Return a ready connection for @p region, or NULL while one is being
+ * established. Never blocks (safe from the tcpip thread) — actual connecting
+ * is offloaded to derp_connect_task. A dead slot is re-claimed and reconnected. */
+static derp_conn_t *derp_ensure_region(int region)
+{
+    if (region <= 0 || !s_pool_mutex) return NULL;
+
+    derp_conn_t *ready = NULL;
+    derp_conn_t *slot  = NULL;
+
+    xSemaphoreTake(s_pool_mutex, portMAX_DELAY);
+    derp_conn_t *c = derp_find_region(region);
+    if (c) {
+        if (c->connecting) {
+            /* connect/reap already in progress */
+        } else if (c->running && c->tls) {
+            ready = c;
+        } else {
+            /* dead slot — re-claim it and reconnect on this region */
+            c->connecting = true;
+            slot = c;
+        }
+    } else {
+        slot = derp_reserve_slot(region);
+        if (!slot)
+            ESP_LOGW(TAG, "DERP pool full (%d conns) — cannot open region %d",
+                     DERP_MAX_CONNS, region);
+    }
+    xSemaphoreGive(s_pool_mutex);
+
+    if (ready) return ready;
+
+    if (slot) {
+        BaseType_t ok = xTaskCreate(derp_connect_task, "ts_derp_conn",
+                                    12288, slot, 4, NULL);
+        if (ok != pdPASS) {
+            ESP_LOGE(TAG, "DERP: connect task spawn failed for region %d", region);
+            xSemaphoreTake(s_pool_mutex, portMAX_DELAY);
+            slot->in_use     = false;
+            slot->connecting = false;
+            xSemaphoreGive(s_pool_mutex);
+        }
+    }
+    return NULL;   /* not ready yet; WG retransmits its handshake */
 }
 
 /* ------------------------------------------------------------------ */
@@ -561,83 +821,17 @@ esp_err_t ts_derp_connect(const ts_derp_node_t *node,
                           const uint8_t node_priv[32],
                           const uint8_t node_pub[32])
 {
-    if (s_tls) ts_derp_disconnect();
-
-    /* If called directly (not via ts_derp_set_home), save params */
-    if (node != &s_home_node) s_home_node = *node;
-    if (node_pub  != s_node_pub)        memcpy(s_node_pub, node_pub, 32);
-    if (node_priv != s_node_priv_saved) memcpy(s_node_priv_saved, node_priv, 32);
-
-    ESP_LOGI(TAG, "DERP: connecting to %s:%d (heap_free=%u)",
-             node->hostname, node->derp_port,
-             (unsigned)esp_get_free_heap_size());
-    esp_tls_cfg_t cfg = {
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .non_block         = false,
-        .timeout_ms        = 60000,   /* cert chain verification on real-HW
-                                       * S3 + concurrent control-TLS load can
-                                       * exceed 20s; give ample headroom. */
-    };
-    s_tls = esp_tls_init();
-    if (!s_tls) {
-        ESP_LOGE(TAG, "esp_tls_init failed");
-        return ESP_ERR_NO_MEM;
-    }
-    int ret = esp_tls_conn_new_sync(node->hostname,
-                                    (int)strlen(node->hostname),
-                                    (int)node->derp_port, &cfg, s_tls);
-    if (ret != 1) {
-        int last_err = 0, mb_err = 0, flags = 0;
-        esp_tls_get_and_clear_last_error(&((esp_tls_last_error_t){0}),
-                                         &mb_err, &flags);
-        (void)last_err;
-        ESP_LOGE(TAG, "TLS connect to DERP %s failed: ret=%d mbedtls=-0x%04x flags=0x%x heap=%u",
-                 node->hostname, ret, -mb_err, flags,
-                 (unsigned)esp_get_free_heap_size());
-        esp_tls_conn_destroy(s_tls);
-        s_tls = NULL;
-        return ESP_FAIL;
-    }
-
-    if (!s_tx_mutex) {
-        s_tx_mutex = xSemaphoreCreateMutex();
-    }
-    if (!s_tx_queue) {
-        s_tx_queue = xQueueCreate(DERP_TX_QUEUE_LEN, sizeof(derp_tx_item_t *));
-    }
-
-    esp_err_t err = derp_http_upgrade(node_priv);
-    if (err != ESP_OK) {
-        esp_tls_conn_destroy(s_tls);
-        s_tls = NULL;
-        return err;
-    }
-
-    /* Set receive timeout so recv_task can wake up and send keepalives */
-    int sockfd = -1;
-    if (esp_tls_get_conn_sockfd(s_tls, &sockfd) == ESP_OK && sockfd >= 0) {
-        struct timeval tv = {
-            .tv_sec  = DERP_RECV_TIMEOUT_MS / 1000,
-            .tv_usec = (DERP_RECV_TIMEOUT_MS % 1000) * 1000,
-        };
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
-
-    s_running = true;
-    xTaskCreate(derp_recv_task, "ts_derp_rx", DERP_RECV_TASK_STACK,
-                NULL, DERP_RECV_TASK_PRIO, &s_recv_task);
-    xTaskCreate(derp_ka_task, "ts_derp_ka", DERP_KA_TASK_STACK,
-                NULL, DERP_KA_TASK_PRIO, &s_ka_task);
-    xTaskCreate(derp_tx_task, "ts_derp_tx", DERP_TX_TASK_STACK,
-                NULL, DERP_TX_TASK_PRIO, &s_tx_task);
-
-    return ESP_OK;
+    /* Treat as "connect to this node's region as home". */
+    return ts_derp_set_home(node, node_priv, node_pub);
 }
 
-esp_err_t ts_derp_send(const uint8_t dst_pub[32],
+esp_err_t ts_derp_send(int region, const uint8_t dst_pub[32],
                        const uint8_t *pkt, size_t pkt_len)
 {
-    if (!s_tls || !s_running) return ESP_ERR_INVALID_STATE;
+    if (region <= 0) region = s_home_region;
+
+    derp_conn_t *c = derp_ensure_region(region);
+    if (!c) return ESP_ERR_INVALID_STATE;   /* connecting / unavailable */
 
     /* SendPacket payload: [32 dst pub][WG packet] */
     size_t payload_len = 32 + pkt_len;
@@ -648,11 +842,12 @@ esp_err_t ts_derp_send(const uint8_t dst_pub[32],
 
     /* Defer the TLS write to derp_tx_task so callers (including the lwIP
      * core-lock holder) don't block on socket I/O. */
-    esp_err_t err = derp_tx_enqueue(DERP_FRAME_SEND_PACKET, payload, payload_len);
+    esp_err_t err = derp_tx_enqueue(c, DERP_FRAME_SEND_PACKET,
+                                    payload, payload_len);
     free(payload);
 
-    ESP_LOGD(TAG, "ts_derp_send dst=%02x%02x%02x%02x type=0x%02x len=%u enq=%d",
-             dst_pub[0], dst_pub[1], dst_pub[2], dst_pub[3],
+    ESP_LOGD(TAG, "ts_derp_send region=%d dst=%02x%02x%02x%02x type=0x%02x len=%u enq=%d",
+             region, dst_pub[0], dst_pub[1], dst_pub[2], dst_pub[3],
              pkt_len > 0 ? pkt[0] : 0, (unsigned)pkt_len, err);
 
     return err;
@@ -660,53 +855,43 @@ esp_err_t ts_derp_send(const uint8_t dst_pub[32],
 
 void ts_derp_disconnect(void)
 {
-    s_running = false;
-    if (s_tls) {
-        esp_tls_conn_destroy(s_tls);
-        s_tls = NULL;
+    if (!s_pool_mutex) return;
+    for (int i = 0; i < DERP_MAX_CONNS; i++) {
+        xSemaphoreTake(s_pool_mutex, portMAX_DELAY);
+        bool active = s_conns[i].in_use;
+        xSemaphoreGive(s_pool_mutex);
+        if (!active) continue;
+        derp_conn_teardown(&s_conns[i]);
+        xSemaphoreTake(s_pool_mutex, portMAX_DELAY);
+        s_conns[i].in_use     = false;
+        s_conns[i].connecting = false;
+        xSemaphoreGive(s_pool_mutex);
     }
-    s_recv_task = NULL;
-    s_ka_task   = NULL;
-    s_tx_task   = NULL;
-    vTaskDelay(pdMS_TO_TICKS(100));
-}
-
-/* Background task that calls ts_derp_connect then deletes itself */
-static void derp_connect_task(void *arg)
-{
-    (void)arg;
-    ts_derp_connect(&s_home_node, s_node_priv_saved, s_node_pub);
-    s_connecting = false;
-    vTaskDelete(NULL);
 }
 
 esp_err_t ts_derp_set_home(const ts_derp_node_t *node,
                            const uint8_t node_priv[32],
                            const uint8_t node_pub[32])
 {
-    /* Already connected to this server */
-    if ((s_tls || s_connecting) &&
-        strcmp(s_home_node.hostname, node->hostname) == 0 &&
-        s_home_node.derp_port == node->derp_port) {
-        return ESP_OK;
-    }
-    /* Save params before spawning the task */
-    s_home_node = *node;
+    derp_pool_init_once();
+
+    /* Save the shared identity used for every region connection. */
     memcpy(s_node_pub,        node_pub,  32);
     memcpy(s_node_priv_saved, node_priv, 32);
-    s_connecting = true;
-    ESP_LOGI(TAG, "DERP: spawning connect task for %s", node->hostname);
-    BaseType_t ok = xTaskCreate(derp_connect_task, "ts_derp_conn", 12288, NULL, 4, NULL);
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "DERP: xTaskCreate failed (%d)", (int)ok);
-        s_connecting = false;
-    }
+    s_home_region = node->region_id;
+
+    /* Make sure the netmap can resolve the home region for the connect task
+     * even before the next DERPMap is parsed: if it can't, fall through and
+     * derp_connect_task will log "region unknown". */
+    ESP_LOGI(TAG, "DERP: home region %d (%s)", node->region_id, node->hostname);
+    derp_ensure_region(node->region_id);
     return ESP_OK;
 }
 
-/* wireguard_derp_output_fn-compatible wrapper */
+/* wireguard_derp_output_fn-compatible wrapper. @p region is the peer's home
+ * DERP region (carried in the WG peer's pseudo-endpoint port). */
 void ts_derp_send_packet(const uint8_t *peer_pub,
-                         const uint8_t *pkt, size_t pkt_len)
+                         const uint8_t *pkt, size_t pkt_len, int region)
 {
-    ts_derp_send(peer_pub, pkt, pkt_len);
+    ts_derp_send(region, peer_pub, pkt, pkt_len);
 }

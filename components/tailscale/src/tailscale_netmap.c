@@ -51,6 +51,12 @@ static char          s_self_ip[20];
 static ts_derp_node_t s_derp_home;
 static bool           s_derp_home_valid = false;
 
+/* Full DERP region table (region_id -> node). Needed so the DERP client
+ * can open a connection to *any* peer's home region, not just ours. */
+#define TS_DERP_MAX_REGIONS 32
+static ts_derp_node_t s_derp_regions[TS_DERP_MAX_REGIONS];
+static int            s_derp_region_count = 0;
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                              */
 /* ------------------------------------------------------------------ */
@@ -281,6 +287,21 @@ static bool regions_key_handler(ts_js_t *j, void *ctx)
         st->best_node.region_id = r.region_id;
         st->found     = true;
     }
+    // Record every region into the full table so we can connect to a
+    // peer's home region on demand (multi-region DERP).
+    if (r.have_node0 && r.node0.hostname[0] &&
+        s_derp_region_count < TS_DERP_MAX_REGIONS) {
+        ts_derp_node_t *slot = NULL;
+        for (int i = 0; i < s_derp_region_count; i++) {
+            if (s_derp_regions[i].region_id == r.region_id) {
+                slot = &s_derp_regions[i];
+                break;
+            }
+        }
+        if (!slot) slot = &s_derp_regions[s_derp_region_count++];
+        *slot = r.node0;
+        slot->region_id = r.region_id;
+    }
     return true;
 }
 
@@ -296,6 +317,7 @@ static bool derpmap_key_handler(ts_js_t *j, void *ctx)
 static void parse_derpmap_stream(ts_js_t *j)
 {
     if (ts_js_next(j) != TS_JS_OBJ_START) return;
+    s_derp_region_count = 0;   // rebuild the region table from this DERPMap
     derp_state_t st = { .best_id = INT32_MAX };
     walk_object(j, derpmap_key_handler, &st);
     if (st.found) {
@@ -645,6 +667,18 @@ esp_err_t ts_netmap_apply(const char *json_str, size_t json_len)
 void ts_netmap_get_self_ip(char *ip_str, size_t ip_str_len)
 {
     strlcpy(ip_str, s_self_ip, ip_str_len);
+}
+
+bool ts_netmap_get_derp_region(int region_id, ts_derp_node_t *out)
+{
+    if (!out || region_id <= 0) return false;
+    for (int i = 0; i < s_derp_region_count; i++) {
+        if (s_derp_regions[i].region_id == region_id) {
+            *out = s_derp_regions[i];
+            return true;
+        }
+    }
+    return false;
 }
 
 // Case-insensitive match of `name` against either the full peer Name
