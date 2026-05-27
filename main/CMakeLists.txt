@@ -36,6 +36,7 @@ idf_component_register(
         "tofu.cpp"
         "usb_host_root.cpp"
         "usbserial_connection.cpp"
+        "vpn.cpp"
         "status_bar.cpp"
         "ui_root.cpp"
     INCLUDE_DIRS "."

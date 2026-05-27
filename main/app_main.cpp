@@ -36,6 +36,7 @@
 #include "wifi_config.hpp"
 #include "wifi_setup.hpp"
 #endif
+#include "vpn.hpp"
 #include "connection.hpp"
 #include "profiles.hpp"
 #include "reconnect.hpp"
@@ -177,9 +178,35 @@ extern "C" void app_main(void) {
             uint8_t c = (st.ip4 >> 16) & 0xFF;
             uint8_t d = (st.ip4 >> 24) & 0xFF;
             snprintf(line, sizeof(line),
-                     "\x1b[32mWi-Fi connected\x1b[0m  IP=%u.%u.%u.%u\r\n\r\n",
+                     "\x1b[32mWi-Fi connected\x1b[0m  IP=%u.%u.%u.%u\r\n",
                      a, b, c, d);
             term_write(line);
+
+            // Bring up the VPN (Tailscale or WireGuard, depending on
+            // Kconfig). No-op if disabled at compile time.
+            if (tab5::vpn::start(/*timeout_s=*/30)) {
+                char vip[32] = {0};
+                if (tab5::vpn::get_tailscale_ip(vip, sizeof(vip))) {
+                    snprintf(line, sizeof(line),
+                             "\x1b[32mTailscale up\x1b[0m  %s\r\n\r\n", vip);
+                    term_write(line);
+                } else {
+                    term_write("\x1b[32mVPN up\x1b[0m\r\n\r\n"sv);
+                }
+            } else {
+                char url[256] = {0};
+                if (tab5::vpn::get_pending_auth_url(url, sizeof(url))) {
+                    char buf[320];
+                    snprintf(buf, sizeof(buf),
+                             "\x1b[33mTailscale awaiting approval:\x1b[0m\r\n"
+                             "  %s\r\n\r\n", url);
+                    term_write(buf);
+                } else if (tab5::vpn::kind() != tab5::vpn::Kind::None) {
+                    term_write("\x1b[33mVPN: not up\x1b[0m\r\n\r\n"sv);
+                } else {
+                    term_write("\r\n"sv);
+                }
+            }
         } else {
             term_write("\x1b[31mWi-Fi connect failed\x1b[0m\r\n\r\n"sv);
         }
@@ -225,6 +252,17 @@ extern "C" void app_main(void) {
         bool need_wifi = pp && (pp->proto == tab5::ConnProto::SSH ||
                                 pp->proto == tab5::ConnProto::Telnet);
         if (need_wifi && !tab5::wifi_status().connected) {
+            pp = std::nullopt;
+        }
+        // When a VPN backend is compiled in, gate the remote auto-connect
+        // on it being up — tailnet hostname resolution and routes only
+        // work once Tailscale / WireGuard is established. USB-serial is
+        // out-of-band and doesn't care.
+        if (pp && need_wifi &&
+            tab5::vpn::kind() != tab5::vpn::Kind::None &&
+            !tab5::vpn::is_up()) {
+            term_write("\x1b[33mVPN not up — skipping remote auto-connect.\r\n"
+                       "Open the menu to retry once VPN comes up.\x1b[0m\r\n\r\n"sv);
             pp = std::nullopt;
         }
 

@@ -1,0 +1,6 @@
+## Tailscale needs cJSON for control-server / netmap JSON parsing.
+## (CMakeLists.txt references it via idf_component_get_property; the
+## component manager isn't aware of the dep without this manifest.)
+dependencies:
+  idf: '>=6.0'
+  espressif/cjson: '*'

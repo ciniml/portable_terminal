@@ -13,6 +13,11 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 
+#include "sdkconfig.h"
+#if CONFIG_TAILSCALE_ENABLE
+#include "tailscale_esp32.h"
+#endif
+
 namespace tab5 {
 
 namespace {
@@ -81,13 +86,23 @@ void shutdown_session() {
 bool dial(const char* host, uint16_t port) {
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", port);
+
+    const char* dial_host = host;
+    char ts_ip[20] = {0};
+#if CONFIG_TAILSCALE_ENABLE
+    if (tailscale_esp32_resolve(host, ts_ip, sizeof(ts_ip)) == ESP_OK) {
+        ESP_LOGI(kTag, "tailscale: %s -> %s", host, ts_ip);
+        dial_host = ts_ip;
+    }
+#endif
+
     struct addrinfo hints = {};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo* res = nullptr;
-    int rc = getaddrinfo(host, port_str, &hints, &res);
+    int rc = getaddrinfo(dial_host, port_str, &hints, &res);
     if (rc != 0 || !res) {
-        ESP_LOGE(kTag, "getaddrinfo(%s) -> %d", host, rc);
+        ESP_LOGE(kTag, "getaddrinfo(%s) -> %d", dial_host, rc);
         return false;
     }
     int s = -1;

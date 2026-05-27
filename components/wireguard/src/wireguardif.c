@@ -229,8 +229,16 @@ static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, con
 			result = ERR_CONN;
 		}
 	} else {
-		// No valid keys!
-		result = ERR_CONN;
+		// No valid keys yet. Returning ERR_CONN here propagates as
+		// EHOSTUNREACH to the syscall layer and makes outbound dials
+		// (TCP connect, getaddrinfo+connect) fail before the periodic
+		// timer ever gets a chance to fire the first handshake. Mark
+		// the peer so the timer (or the next call here after we kick
+		// it off) starts the handshake, and silently drop this one
+		// packet — TCP will retransmit, by which time the keypair
+		// should be live.
+		peer->send_handshake = true;
+		result = ERR_OK;
 	}
 	return result;
 }
@@ -708,7 +716,12 @@ static err_t wireguard_start_handshake(struct netif *netif, struct wireguard_pee
 	pbuf = wireguardif_initiate_handshake(device, peer, &msg, &result);
 	if (pbuf) {
 		result = wireguardif_peer_output(netif, pbuf, peer);
-		log_d(TAG "start handshake %08x,%d - %d", peer->ip.u_addr.ip4.addr, peer->port, result);
+		ESP_LOGI(TAG, "start handshake to %u.%u.%u.%u:%u -> %d",
+		         (peer->ip.u_addr.ip4.addr      ) & 0xff,
+		         (peer->ip.u_addr.ip4.addr >>  8) & 0xff,
+		         (peer->ip.u_addr.ip4.addr >> 16) & 0xff,
+		         (peer->ip.u_addr.ip4.addr >> 24) & 0xff,
+		         peer->port, result);
 		pbuf_free(pbuf);
 		peer->send_handshake = false;
 		peer->last_initiation_tx = wireguard_sys_now();
@@ -963,10 +976,12 @@ static void wireguardif_tmr(void *arg) {
 		}
 	}
 
-	if (!link_up) {
-		// Clear the IF-UP flag on netif
-		netif_set_link_down(device->netif);
-	}
+	(void)link_up;
+	// Intentionally do NOT auto-down the netif when no peer has a valid
+	// keypair: in managed mode (Tailscale) lwIP needs to route outbound
+	// traffic through the WG netif before any handshake completes so
+	// the very first packet can trigger an initiation. Link is set up
+	// by wireguard_esp32_set_address and stays up until shutdown.
 }
 
 void wireguardif_shutdown(struct netif *netif) {

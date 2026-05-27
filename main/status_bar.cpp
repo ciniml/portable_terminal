@@ -16,6 +16,7 @@
 #if CONFIG_TAB5_WIFI_ENABLED
 #include "wifi_setup.hpp"
 #endif
+#include "vpn.hpp"
 
 namespace tab5 {
 
@@ -116,6 +117,22 @@ void status_render_impl() {
         value("Wi-Fi: up");
         d.setTextColor(kFgColor, kBgColor);
         value(ipbuf);
+        if (vpn::is_up()) {
+            d.setTextColor(kBatGoodColor, kBgColor);
+            const char* tag =
+                vpn::kind() == vpn::Kind::Tailscale ? "tailscale" :
+                vpn::kind() == vpn::Kind::WireGuard ? "wireguard" :
+                                                     "vpn";
+            char buf[40];
+            snprintf(buf, sizeof(buf), "%s: up", tag);
+            value(buf);
+            char vip[32];
+            if (vpn::get_tailscale_ip(vip, sizeof(vip))) {
+                d.setTextColor(kFgColor, kBgColor);
+                value(vip);
+            }
+            d.setTextColor(kFgColor, kBgColor);
+        }
     } else {
         d.setTextColor(kBatLowColor, kBgColor);
         value("Wi-Fi: down");

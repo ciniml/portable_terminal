@@ -22,6 +22,10 @@
 
 #include "tofu.hpp"
 
+#if CONFIG_TAILSCALE_ENABLE
+#include "tailscale_esp32.h"
+#endif
+
 #if CONFIG_TAB5_SSH_PUBKEY_AUTH
 // main/keys/id_rsa, baked in via EMBED_FILES in main/CMakeLists.txt.
 extern "C" const uint8_t _binary_id_rsa_start[];
@@ -87,13 +91,25 @@ bool dial(const char* host, uint16_t port) {
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", port);
 
+    // If the user typed a Tailscale hostname (full or short form) and
+    // the Tailscale netmap has that peer, use the peer's 100.x.y.z so
+    // we don't need a DNS resolver capable of MagicDNS.
+    const char* dial_host = host;
+    char ts_ip[20] = {0};
+#if CONFIG_TAILSCALE_ENABLE
+    if (tailscale_esp32_resolve(host, ts_ip, sizeof(ts_ip)) == ESP_OK) {
+        ESP_LOGI(kTag, "tailscale: %s -> %s", host, ts_ip);
+        dial_host = ts_ip;
+    }
+#endif
+
     struct addrinfo hints = {};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo* res = nullptr;
-    int rc = getaddrinfo(host, port_str, &hints, &res);
+    int rc = getaddrinfo(dial_host, port_str, &hints, &res);
     if (rc != 0 || !res) {
-        ESP_LOGE(kTag, "getaddrinfo(%s): %d", host, rc);
+        ESP_LOGE(kTag, "getaddrinfo(%s): %d", dial_host, rc);
         return false;
     }
 

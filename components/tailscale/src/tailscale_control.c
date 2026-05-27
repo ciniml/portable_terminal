@@ -21,6 +21,7 @@
 #include "tailscale_keys.h"
 
 #include "cJSON.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_tls.h"
 #include "esp_crt_bundle.h"
@@ -97,7 +98,7 @@ static int tls_read(uint8_t *buf, size_t len)
 /* the buffer is exhausted.                                            */
 /* ------------------------------------------------------------------ */
 
-static struct {
+static EXT_RAM_BSS_ATTR struct {
     uint8_t  enc_buf[H2_MAX_PAYLOAD + 16]; /* ciphertext from TLS   */
     uint8_t  pt_buf[H2_MAX_PAYLOAD];       /* decrypted plaintext   */
     size_t   pt_len;
@@ -196,7 +197,7 @@ static esp_err_t h2_send_frame(ts_ctrl_ctx_t *ctx,
                                 uint8_t type, uint8_t flags, uint32_t sid,
                                 const uint8_t *payload, uint32_t plen)
 {
-    static uint8_t frame_buf[9 + H2_MAX_PAYLOAD];
+    static EXT_RAM_BSS_ATTR uint8_t frame_buf[9 + H2_MAX_PAYLOAD];
     frame_buf[0] = (plen >> 16) & 0xFF;
     frame_buf[1] = (plen >>  8) & 0xFF;
     frame_buf[2] =  plen        & 0xFF;
@@ -211,7 +212,7 @@ static esp_err_t h2_send_frame(ts_ctrl_ctx_t *ctx,
     uint32_t total   = 9 + plen;
     uint32_t enc_len = total + 16;
 
-    static uint8_t enc_buf[9 + H2_MAX_PAYLOAD + 16];
+    static EXT_RAM_BSS_ATTR uint8_t enc_buf[9 + H2_MAX_PAYLOAD + 16];
     esp_err_t err = ts_noise_encrypt(&ctx->noise, frame_buf, total, enc_buf);
     if (err != ESP_OK) return err;
 
@@ -481,8 +482,8 @@ static esp_err_t h2_post(ts_ctrl_ctx_t *ctx,
     ESP_LOGI(TAG, "H2: POST %s sid=%"PRIu32" body=%u B", path, sid, (unsigned)body_len);
 
     /* Read response frames until END_STREAM on our stream */
-    static uint8_t fp[H2_MAX_PAYLOAD];
-    static uint8_t hdr_block[H2_MAX_PAYLOAD];
+    static EXT_RAM_BSS_ATTR uint8_t fp[H2_MAX_PAYLOAD];
+    static EXT_RAM_BSS_ATTR uint8_t hdr_block[H2_MAX_PAYLOAD];
     int    hdr_block_len  = 0;
     int    http_status    = -1;
     size_t resp_acc       = 0;
@@ -570,7 +571,7 @@ static int map_data_read(ts_ctrl_ctx_t *ctx, uint8_t *out, size_t need)
         }
         if (s_map_rx.done) return (int)total;   /* stream ended */
 
-        static uint8_t fp[H2_MAX_PAYLOAD];
+        static EXT_RAM_BSS_ATTR uint8_t fp[H2_MAX_PAYLOAD];
         uint8_t  ft, ff;
         uint32_t fs, fplen;
         if (h2_read_frame(ctx, &ft, &ff, &fs, fp, &fplen) != ESP_OK) return -1;
@@ -891,7 +892,7 @@ esp_err_t ts_ctrl_register(ts_ctrl_ctx_t *ctx)
     /* Body contains the auth_key in plaintext — log only at DEBUG level. */
     ESP_LOGD(TAG, "RegisterRequest: %s", json_str);
 
-    static uint8_t resp_buf[CTRL_FRAME_BUF];
+    static EXT_RAM_BSS_ATTR uint8_t resp_buf[CTRL_FRAME_BUF];
     size_t resp_len = 0;
     err = h2_post(ctx, "/machine/register",
                   (const uint8_t *)json_str, strlen(json_str),
@@ -990,8 +991,8 @@ esp_err_t ts_ctrl_map_request(ts_ctrl_ctx_t *ctx)
     ESP_LOGI(TAG, "H2: MapRequest sent on sid=%"PRIu32, sid);
 
     /* Consume response HEADERS to validate status */
-    static uint8_t fp[H2_MAX_PAYLOAD];
-    static uint8_t hdr_block[H2_MAX_PAYLOAD];
+    static EXT_RAM_BSS_ATTR uint8_t fp[H2_MAX_PAYLOAD];
+    static EXT_RAM_BSS_ATTR uint8_t hdr_block[H2_MAX_PAYLOAD];
     int  hdr_block_len = 0;
     bool got_headers   = false;
 
@@ -1013,7 +1014,8 @@ esp_err_t ts_ctrl_map_request(ts_ctrl_ctx_t *ctx)
                 ESP_LOGI(TAG, "H2: map :status %d", st);
                 if (st < 200 || st >= 300) {
                     /* Log error body for debugging */
-                    static uint8_t err_fp[H2_MAX_PAYLOAD]; uint32_t err_fplen;
+                    static EXT_RAM_BSS_ATTR uint8_t err_fp[H2_MAX_PAYLOAD];
+                    uint32_t err_fplen;
                     uint8_t eft, eff; uint32_t efs;
                     if (h2_read_frame(ctx, &eft, &eff, &efs, err_fp, &err_fplen) == ESP_OK
                             && eft == H2_FRAME_DATA && err_fplen > 0 && err_fplen < sizeof(err_fp)) {

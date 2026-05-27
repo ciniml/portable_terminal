@@ -40,3 +40,27 @@
 #   ssh-copy-id -i main/keys/id_rsa.pub me@192.168.1.10
 # CONFIG_TAB5_SSH_PUBKEY_AUTH=y
 # CONFIG_TAB5_SSH_KEY_PASSPHRASE=""
+
+# --- WireGuard VPN (opt-in) -------------------------------------------
+# Bring up a WireGuard tunnel after Wi-Fi connects. The component's
+# Kconfig values are the boot-time defaults; runtime overrides come
+# from NVS namespace "wireguard" (set elsewhere — there's no on-device
+# editor yet).
+# CONFIG_WIREGUARD_ENABLE=y
+# CONFIG_WIREGUARD_LOCAL_IP="10.0.0.2"
+# CONFIG_WIREGUARD_LOCAL_NETMASK="255.255.255.0"
+# CONFIG_WIREGUARD_PRIVATE_KEY="<base64 private key (wg genkey)>"
+# CONFIG_WIREGUARD_PEER_PUBLIC_KEY="<base64 peer pubkey>"
+# CONFIG_WIREGUARD_PEER_ENDPOINT="vpn.example.com"
+# CONFIG_WIREGUARD_PEER_PORT=51820
+# CONFIG_WIREGUARD_PERSISTENT_KEEPALIVE=25
+
+# --- Tailscale (opt-in; auto-selects when both enabled) ----------------
+# Tailscale uses the WireGuard data plane (auto-enabled) but talks to a
+# control server for netmap / DERP / DISCO. Generate an auth key at
+# https://login.tailscale.com/admin/settings/keys and paste below.
+# CONFIG_TAILSCALE_ENABLE=y
+# CONFIG_TAILSCALE_AUTH_KEY="tskey-auth-..."
+# CONFIG_TAILSCALE_HOSTNAME="tab5"
+# CONFIG_TAILSCALE_CONTROL_SERVER="login.tailscale.com"
+# CONFIG_TAILSCALE_LISTEN_PORT=41641

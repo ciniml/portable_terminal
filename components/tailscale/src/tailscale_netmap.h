@@ -44,3 +44,17 @@ bool ts_netmap_get_derp_home(ts_derp_node_t *node_out);
  * @param ip_str_len  Buffer length; 20 bytes is sufficient.
  */
 void ts_netmap_get_self_ip(char *ip_str, size_t ip_str_len);
+
+/**
+ * @brief Look up the Tailscale IP of a peer by name.
+ *
+ * Matches the supplied name against each peer's Tailscale Name and the
+ * short form before the first '.', so users can type either "host" or
+ * "host.tail-xxxxx.ts.net". Case-insensitive.
+ *
+ * @param name        Hostname to resolve.
+ * @param ip_str      Destination buffer for the dotted-quad IPv4 string.
+ * @param ip_str_len  Capacity of ip_str (>= 16 recommended).
+ * @return true on hit, false on miss.
+ */
+bool ts_netmap_resolve(const char *name, char *ip_str, size_t ip_str_len);

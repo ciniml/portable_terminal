@@ -76,6 +76,23 @@ esp_err_t tailscale_esp32_get_ip(char *ip_str, size_t ip_str_len);
  */
 esp_err_t tailscale_esp32_get_auth_url(char *url_str, size_t url_str_len);
 
+/**
+ * @brief Resolve a Tailscale hostname to a 100.x.y.z IP.
+ *
+ * Matches against the Name field of each peer in the most recent netmap.
+ * Accepts either the short form ("host") or the FQDN
+ * ("host.tail-xxxxx.ts.net"); matching is case-insensitive.
+ *
+ * @param name        Hostname to look up.
+ * @param ip_str      Destination buffer for the dotted-quad IPv4 string.
+ * @param ip_str_len  Capacity of ip_str (>= 16 recommended).
+ * @return ESP_OK on hit, ESP_ERR_NOT_FOUND on miss, ESP_ERR_INVALID_ARG
+ *         on a NULL/zero-size buffer.
+ */
+esp_err_t tailscale_esp32_resolve(const char *name,
+                                  char       *ip_str,
+                                  size_t      ip_str_len);
+
 #ifdef __cplusplus
 }
 #endif

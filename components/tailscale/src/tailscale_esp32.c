@@ -245,3 +245,12 @@ esp_err_t tailscale_esp32_get_auth_url(char *url_str, size_t url_str_len)
     strlcpy(url_str, src ? src : "", url_str_len);
     return ESP_OK;
 }
+
+esp_err_t tailscale_esp32_resolve(const char *name,
+                                  char       *ip_str,
+                                  size_t      ip_str_len)
+{
+    if (!name || !ip_str || ip_str_len == 0) return ESP_ERR_INVALID_ARG;
+    return ts_netmap_resolve(name, ip_str, ip_str_len) ? ESP_OK
+                                                       : ESP_ERR_NOT_FOUND;
+}

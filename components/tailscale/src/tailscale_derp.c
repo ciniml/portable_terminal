@@ -11,6 +11,7 @@
 #include "crypto.h"              /* wireguard_x25519, etc. */
 #include "crypto/refc/poly1305-donna.h"
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_tls.h"
 #include "esp_crt_bundle.h"
@@ -403,7 +404,7 @@ static void inject_wg_packet(const uint8_t *data, size_t len);
 
 static void derp_recv_task(void *arg)
 {
-    static uint8_t frame_buf[DERP_MAX_FRAME];
+    static EXT_RAM_BSS_ATTR uint8_t frame_buf[DERP_MAX_FRAME];
 
     while (s_running) {
         uint8_t frame_type; uint32_t payload_len;

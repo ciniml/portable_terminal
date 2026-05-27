@@ -442,6 +442,13 @@ esp_err_t wireguard_esp32_set_address(const char *local_ip,
     ip4addr_aton(local_netmask, &netmask4);
     ip4addr_aton("0.0.0.0",     &gateway4);
     netif_set_addr(s_wg_netif, &ipaddr4, &netmask4, &gateway4);
+    // Force link_up so lwIP's ip4_route picks this netif for traffic in
+    // the configured subnet before any peer handshake has completed.
+    // wireguardif normally sets link_up only after a peer's first
+    // successful handshake, which is a chicken-and-egg situation for
+    // outbound dials: without a route, lwIP returns EHOSTUNREACH and
+    // no packet ever reaches wireguardif to trigger the handshake.
+    netif_set_link_up(s_wg_netif);
     ESP_LOGD(TAG, "WireGuard address updated: %s / %s", local_ip, local_netmask);
     return ESP_OK;
 }

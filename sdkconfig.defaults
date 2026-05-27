@@ -14,6 +14,14 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # Disable Tailscale to avoid pulling in TLS/lwIP tuning until Phase 3+.
 CONFIG_TAILSCALE_ENABLE=n
 
+# Route Tailscale peer traffic through the DERP relay rather than the
+# advertised direct UDP endpoint. The simplified data plane has no
+# DISCO-driven direct-path negotiation / fallback, so a fixed direct
+# endpoint that doesn't work (NAT, hairpin, expired mapping) leaves the
+# peer permanently unreachable. DERP reaches the peer by public key via
+# the relay mesh and works from any network. Slower but reliable.
+CONFIG_TAILSCALE_DERP_ONLY=y
+
 # C++ exceptions off (default), but enable RTTI for std::expected helpers
 # if needed by future code. Keep size optimization for OTA partitions.
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
@@ -29,3 +37,30 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
 # FTDI USB-Serial host driver (used by UsbSerialConnection).
 CONFIG_USB_HOST_ENABLE_FTDI_SIO_DRIVER=y
+
+# WireGuard VPN is opt-in — empty keys make wireguard_esp32_start fail
+# loud, so default off and let the user enable in sdkconfig.defaults.local
+# once they have a peer to connect to.
+CONFIG_WIREGUARD_ENABLE=n
+
+# Tailscale fans every tailnet peer into a separate WireGuard peer.
+# The WG default is 1 peer; raise to 16 so a typical tailnet fits
+# without "wireguardif_add_peer failed — max peers reached" spam.
+# Tracks CONFIG_TAILSCALE_MAX_PEERS upper bound. Each peer is ~800 B.
+CONFIG_WIREGUARD_MAX_PEERS=16
+
+# Allow .bss to spill into PSRAM via EXT_RAM_BSS_ATTR. The Tailscale
+# component tags its big H2 / HPACK / DERP frame buffers (~40 KB) with
+# this attribute; without it, those land in internal SRAM and starve
+# the esp_hosted SDIO mempool at boot.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+# WireGuard's lwIP netif is raw (not wrapped in an esp_netif). Without
+# this flag, lwIP stores the esp_netif pointer in `netif->state` —
+# colliding with WireGuard's use of the same field — and esp_netif's
+# ext callback dereferences a bogus pointer, panicking with a load
+# fault inside esp_netif_internal_dhcpc_cb when wireguardif's netif
+# comes up. Enabling bridge support flips esp_netif over to its
+# client_data slot for the back-pointer, so the WG netif's NULL
+# client_data is recognised and the callback returns early.
+CONFIG_ESP_NETIF_BRIDGE_EN=y
