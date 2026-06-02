@@ -4,8 +4,7 @@ M5Stack Tab5 (ESP32-P4) terminal emulator. Long-term goal: multi-connection
 client (UART / USB-serial / Telnet / SSH) over WireGuard / Tailscale VPN.
 
 Phase 1 = host-tested VT100 core (`components/term_core`) + Tab5 LCD bring-up.
-See `PLAN.md` for the high-level scope and `/home/kenta/.claude/plans/` for the
-detailed implementation plan.
+See `PLAN.md` for the high-level scope.
 
 ## ESP-IDF
 
@@ -242,10 +241,10 @@ fingerprints; selectively rotating one entry isn't exposed yet.
 ## Reusable components
 
 `wireguard`, `tailscale`, and `usb_host_ftdi_sio` are vendored from
-`/home/kenta/repos/serial_wifi_logger/components/` for use in Phase 2+. They
-are present in the IDF build but disabled at runtime in Phase 1
-(`CONFIG_TAILSCALE_ENABLE=n`). Re-sync from upstream periodically — there is
-no automation for this yet.
+[ciniml/serial_wifi_logger](https://github.com/ciniml/serial_wifi_logger)
+(`components/`) for use in Phase 2+. They are present in the IDF build but
+disabled at runtime in Phase 1 (`CONFIG_TAILSCALE_ENABLE=n`). Re-sync from
+upstream periodically — there is no automation for this yet.
 
 `espressif/usb` (transitively required by `usb_host_ftdi_sio`) is pinned to
 `==1.1.0` in the FTDI manifest. Newer registry releases break the IDF 6.0
