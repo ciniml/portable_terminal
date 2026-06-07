@@ -5,8 +5,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "esp_log.h"
@@ -18,6 +20,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "boot_progress.hpp"
 #include "byte_input.hpp"
 #include "cooked_input.hpp"
 #include "cursor_renderer.hpp"
@@ -86,19 +89,240 @@ void on_blink_tick(void* /*arg*/) {
 }
 
 // Build a sink that owns its own CookedInputFilter so each input source
-// (USB-JTAG, UART, future Telnet/SSH) tracks CR/LF state independently.
-// The sink itself locks the global mutex and forwards through the
-// shared terminal + cursor.
+// (USB-JTAG, UART, USB-HID, soft keyboard) tracks CR/LF state independently
+// while no remote session is up. The sink itself dispatches:
+//   - if a remote IConnection is active → forward raw bytes to it (the
+//     remote echoes / handles BS itself; running CR→CRLF / BS-Space-BS
+//     locally would double-edit);
+//   - otherwise → run the cooked filter, lock the UI mutex, and apply()
+//     into the local terminal so the device still behaves as a typing
+//     surface when no remote is connected.
+// The active-connection check happens at every byte batch, so sinks
+// captured at boot keep working after a later auto-connect / supervisor
+// reconnect without needing to be rebound.
 template <class TerminalApply>
 tab5::ByteSink make_source_sink(TerminalApply&& apply) {
     auto state = std::make_shared<tab5::CookedInputFilter>();
     return [state, apply](std::span<const uint8_t> bytes) mutable {
+        if (auto* c = tab5::active_connection()) {
+            c->send(bytes);
+            return;
+        }
         std::vector<uint8_t> mapped;
         mapped.reserve(bytes.size() * 3);
         state->process(bytes, mapped);
         Lock lk;
         apply(std::span<const uint8_t>(mapped.data(), mapped.size()));
     };
+}
+
+// Active connection + the profile that produced it. The connection's
+// config structs (SshConfig / TelnetConfig) hold raw const char* into
+// the profile's char[] fields, so the profile must outlive the
+// connection — keep both at file scope.
+std::unique_ptr<tab5::IConnection> g_conn;
+std::optional<tab5::Profile>       g_active_profile;
+
+// Callbacks the boot task needs (closures over the terminal / cursor
+// statics in app_main). Heap-allocated and handed to xTaskCreate as
+// void* so the task can drain them and free.
+struct BootDeps {
+    std::function<void(std::string_view)>            term_write;
+    std::function<void(std::span<const uint8_t>)>    remote_rx;
+    std::function<std::pair<uint16_t, uint16_t>()>   get_pty_size;
+    uint16_t cols;
+    uint16_t rows;
+};
+
+void do_boot_sequence(const BootDeps& d) {
+    using namespace std::string_view_literals;
+    using Stage = tab5::boot_progress::Stage;
+    tab5::boot_progress::clear_cancel();
+
+#if CONFIG_TAB5_WIFI_ENABLED
+    if (tab5::wifi_config::has_credentials()) {
+        auto wc = tab5::wifi_config::get();
+        tab5::boot_progress::set(Stage::WifiConnecting, wc.ssid);
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "\x1b[2mWi-Fi: connecting to %s ...\x1b[0m\r\n", wc.ssid);
+        d.term_write(line);
+
+        auto rc = tab5::wifi_sta_connect(wc.ssid, wc.psk, wc.timeout_s);
+        if (tab5::boot_progress::cancel_requested()) {
+            tab5::boot_progress::set(Stage::Cancelled, "wifi");
+            d.term_write("\x1b[33mWi-Fi connect cancelled\x1b[0m\r\n\r\n"sv);
+            return;
+        }
+        if (!rc) {
+            tab5::boot_progress::set(Stage::Failed, "wifi");
+            d.term_write("\x1b[31mWi-Fi connect failed\x1b[0m\r\n\r\n"sv);
+            return;
+        }
+        auto st = tab5::wifi_status();
+        uint8_t a = (st.ip4 >>  0) & 0xFF;
+        uint8_t b = (st.ip4 >>  8) & 0xFF;
+        uint8_t c = (st.ip4 >> 16) & 0xFF;
+        uint8_t e = (st.ip4 >> 24) & 0xFF;
+        std::snprintf(line, sizeof(line),
+                      "\x1b[32mWi-Fi connected\x1b[0m  IP=%u.%u.%u.%u\r\n",
+                      a, b, c, e);
+        d.term_write(line);
+
+        // VPN bring-up.
+        if (tab5::vpn::kind() != tab5::vpn::Kind::None) {
+            const char* kind_lbl =
+                (tab5::vpn::kind() == tab5::vpn::Kind::Tailscale)
+                    ? "tailscale" : "wireguard";
+            tab5::boot_progress::set(Stage::VpnConnecting, kind_lbl);
+            bool up = tab5::vpn::start(
+                /*timeout_s=*/30,
+                [](tab5::vpn::StartStage s, const char* det) {
+                    switch (s) {
+                    case tab5::vpn::StartStage::SyncingClock:
+                        tab5::boot_progress::set(Stage::VpnSyncingClock, det);
+                        break;
+                    case tab5::vpn::StartStage::Connecting:
+                        tab5::boot_progress::set(Stage::VpnConnecting, det);
+                        break;
+                    case tab5::vpn::StartStage::AwaitingAuth:
+                        tab5::boot_progress::set(Stage::VpnAwaitAuth, det);
+                        break;
+                    }
+                },
+                [] { return tab5::boot_progress::cancel_requested(); });
+            if (tab5::boot_progress::cancel_requested()) {
+                tab5::boot_progress::set(Stage::Cancelled, "vpn");
+                d.term_write("\x1b[33mVPN connect cancelled\x1b[0m\r\n\r\n"sv);
+                return;
+            }
+            if (up) {
+                char vip[32] = {0};
+                if (tab5::vpn::get_tailscale_ip(vip, sizeof(vip))) {
+                    std::snprintf(line, sizeof(line),
+                                  "\x1b[32mTailscale up\x1b[0m  %s\r\n\r\n", vip);
+                    d.term_write(line);
+                } else {
+                    d.term_write("\x1b[32mVPN up\x1b[0m\r\n\r\n"sv);
+                }
+            } else {
+                char url[256] = {0};
+                if (tab5::vpn::get_pending_auth_url(url, sizeof(url))) {
+                    char buf[320];
+                    std::snprintf(buf, sizeof(buf),
+                                  "\x1b[33mTailscale awaiting approval:\x1b[0m\r\n"
+                                  "  %s\r\n\r\n", url);
+                    d.term_write(buf);
+                } else {
+                    d.term_write("\x1b[33mVPN: not up\x1b[0m\r\n\r\n"sv);
+                }
+            }
+        }
+    }
+#endif
+
+    // Remote auto-connect from the selected profile.
+    if (tab5::profiles.count() == 0) {
+        tab5::boot_progress::set(Stage::Done);
+        return;
+    }
+    auto pp = tab5::profiles.get(tab5::profiles.selected());
+    bool need_wifi = pp && (pp->proto == tab5::ConnProto::SSH ||
+                            pp->proto == tab5::ConnProto::Telnet);
+    if (need_wifi && !tab5::wifi_status().connected) pp = std::nullopt;
+    if (pp && need_wifi &&
+        tab5::vpn::kind() != tab5::vpn::Kind::None && !tab5::vpn::is_up()) {
+        d.term_write("\x1b[33mVPN not up — skipping remote auto-connect.\r\n"
+                     "Open the menu to retry once VPN comes up.\x1b[0m\r\n\r\n"sv);
+        pp = std::nullopt;
+    }
+    if (!pp) {
+        tab5::boot_progress::set(Stage::Done);
+        return;
+    }
+
+    // Keep the profile alive at file scope — the connection's config
+    // struct holds raw pointers into the profile's char[] fields.
+    g_active_profile = *pp;
+    const tab5::Profile& P = *g_active_profile;
+
+    tab5::boot_progress::set(Stage::RemoteConnecting, P.host);
+    if (tab5::boot_progress::cancel_requested()) {
+        tab5::boot_progress::set(Stage::Cancelled, "remote");
+        d.term_write("\x1b[33mRemote cancel — skipping\x1b[0m\r\n\r\n"sv);
+        return;
+    }
+
+    char line[160];
+    std::unique_ptr<tab5::IConnection> c;
+#if CONFIG_TAB5_SSH_ENABLED
+    if (P.proto == tab5::ConnProto::SSH) {
+        std::snprintf(line, sizeof(line),
+                      "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
+                      P.user, P.host, P.port);
+        d.term_write(line);
+        tab5::SshConfig scfg{
+            .host = P.host,
+            .port = P.port,
+            .user = P.user,
+            .password = P.password,
+            .cols = d.cols,
+            .rows = d.rows,
+            .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
+        };
+        auto s = std::make_unique<tab5::SshConnection>(scfg);
+        if (s->start(d.remote_rx)) c = std::move(s);
+    }
+#endif
+#if CONFIG_TAB5_TELNET_ENABLED
+    if (!c && P.proto == tab5::ConnProto::Telnet) {
+        std::snprintf(line, sizeof(line),
+                      "\x1b[2mTelnet: connecting to %s:%d ...\x1b[0m\r\n",
+                      P.host, P.port);
+        d.term_write(line);
+        tab5::TelnetConfig tcfg{
+            .host = P.host,
+            .port = P.port,
+            .cols = d.cols,
+            .rows = d.rows,
+            .task_stack_bytes = CONFIG_TAB5_TELNET_RX_TASK_STACK,
+        };
+        auto t = std::make_unique<tab5::TelnetConnection>(tcfg);
+        if (t->start(d.remote_rx)) c = std::move(t);
+    }
+#endif
+    if (!c && P.proto == tab5::ConnProto::UsbSerial) {
+        d.term_write("\x1b[2mUSB-serial: opening FTDI ...\x1b[0m\r\n"sv);
+        tab5::UsbSerialConfig ucfg{
+            .baud      = CONFIG_TAB5_USB_SERIAL_BAUD,
+            .data_bits = 8,
+            .stop_bits = 0,
+            .parity    = 0,
+        };
+        auto u = std::make_unique<tab5::UsbSerialConnection>(ucfg);
+        if (u->start(d.remote_rx)) c = std::move(u);
+    }
+
+    if (c) {
+        std::snprintf(line, sizeof(line),
+                      "\x1b[32m%s connected\x1b[0m  %s\r\n",
+                      c->kind(), c->host_label());
+        d.term_write(line);
+        tab5::set_active_connection(c.get());
+        tab5::start_reconnect_supervisor(c.get(), d.remote_rx, d.get_pty_size);
+        g_conn = std::move(c);
+        tab5::boot_progress::set(Stage::Done, "remote up");
+    } else {
+        d.term_write("\x1b[31mRemote connect failed\x1b[0m  "
+                     "(falling back to local echo)\r\n"sv);
+        tab5::boot_progress::set(Stage::Failed, "remote");
+    }
+}
+
+void boot_task(void* arg) {
+    std::unique_ptr<BootDeps> deps{static_cast<BootDeps*>(arg)};
+    do_boot_sequence(*deps);
+    vTaskDelete(nullptr);
 }
 
 }  // namespace
@@ -162,55 +386,10 @@ extern "C" void app_main(void) {
     };
 
 #if CONFIG_TAB5_WIFI_ENABLED
+    // Wi-Fi NVS namespace init only — the actual connect runs in the
+    // boot task after UI / status panel / touch are up so the user
+    // sees the progress and can [Cancel].
     tab5::wifi_config::init();
-    if (tab5::wifi_config::has_credentials()) {
-        auto wc = tab5::wifi_config::get();
-        char line[128];
-        snprintf(line, sizeof(line),
-                 "\x1b[2mWi-Fi: connecting to %s ...\x1b[0m\r\n", wc.ssid);
-        term_write(line);
-
-        auto rc = tab5::wifi_sta_connect(wc.ssid, wc.psk, wc.timeout_s);
-        if (rc) {
-            auto st = tab5::wifi_status();
-            uint8_t a = (st.ip4 >>  0) & 0xFF;
-            uint8_t b = (st.ip4 >>  8) & 0xFF;
-            uint8_t c = (st.ip4 >> 16) & 0xFF;
-            uint8_t d = (st.ip4 >> 24) & 0xFF;
-            snprintf(line, sizeof(line),
-                     "\x1b[32mWi-Fi connected\x1b[0m  IP=%u.%u.%u.%u\r\n",
-                     a, b, c, d);
-            term_write(line);
-
-            // Bring up the VPN (Tailscale or WireGuard, depending on
-            // Kconfig). No-op if disabled at compile time.
-            if (tab5::vpn::start(/*timeout_s=*/30)) {
-                char vip[32] = {0};
-                if (tab5::vpn::get_tailscale_ip(vip, sizeof(vip))) {
-                    snprintf(line, sizeof(line),
-                             "\x1b[32mTailscale up\x1b[0m  %s\r\n\r\n", vip);
-                    term_write(line);
-                } else {
-                    term_write("\x1b[32mVPN up\x1b[0m\r\n\r\n"sv);
-                }
-            } else {
-                char url[256] = {0};
-                if (tab5::vpn::get_pending_auth_url(url, sizeof(url))) {
-                    char buf[320];
-                    snprintf(buf, sizeof(buf),
-                             "\x1b[33mTailscale awaiting approval:\x1b[0m\r\n"
-                             "  %s\r\n\r\n", url);
-                    term_write(buf);
-                } else if (tab5::vpn::kind() != tab5::vpn::Kind::None) {
-                    term_write("\x1b[33mVPN: not up\x1b[0m\r\n\r\n"sv);
-                } else {
-                    term_write("\r\n"sv);
-                }
-            }
-        } else {
-            term_write("\x1b[31mWi-Fi connect failed\x1b[0m\r\n\r\n"sv);
-        }
-    }
 #endif
 
     const esp_timer_create_args_t blink_args = {
@@ -242,142 +421,39 @@ extern "C" void app_main(void) {
 #endif
 
     // Connection profiles live in NVS; profile 0 is seeded from Kconfig
-    // on a virgin device. Pick the selected one for boot auto-connect.
+    // on a virgin device. The boot task spawned at the end of app_main
+    // picks the selected one and dials.
     tab5::profiles.init();
 
-    static std::unique_ptr<tab5::IConnection> conn;
-    if (tab5::profiles.count() > 0) {
-        auto pp = tab5::profiles.get(tab5::profiles.selected());
-        // SSH / Telnet need Wi-Fi; USB-serial doesn't.
-        bool need_wifi = pp && (pp->proto == tab5::ConnProto::SSH ||
-                                pp->proto == tab5::ConnProto::Telnet);
-        if (need_wifi && !tab5::wifi_status().connected) {
-            pp = std::nullopt;
-        }
-        // When a VPN backend is compiled in, gate the remote auto-connect
-        // on it being up — tailnet hostname resolution and routes only
-        // work once Tailscale / WireGuard is established. USB-serial is
-        // out-of-band and doesn't care.
-        if (pp && need_wifi &&
-            tab5::vpn::kind() != tab5::vpn::Kind::None &&
-            !tab5::vpn::is_up()) {
-            term_write("\x1b[33mVPN not up — skipping remote auto-connect.\r\n"
-                       "Open the menu to retry once VPN comes up.\x1b[0m\r\n\r\n"sv);
-            pp = std::nullopt;
-        }
-
-        auto remote_rx = [](std::span<const uint8_t> bytes) {
-            Lock lk;
-            if (tab5::ui_root::overlay_active()) {
-                (void)terminal.feed(bytes);
-                return;
-            }
-            cursor.erase();
+    // RX path the connection writes incoming bytes through (held by the
+    // I/O task and by the reconnect supervisor). Captures terminal /
+    // cursor by reference; they're statics in app_main.
+    auto remote_rx = [](std::span<const uint8_t> bytes) {
+        Lock lk;
+        if (tab5::ui_root::overlay_active()) {
             (void)terminal.feed(bytes);
-            (void)terminal.render_dirty();
-            cursor.draw();
-        };
-
-        if (false) {}
-#if CONFIG_TAB5_SSH_ENABLED
-        else if (pp && pp->proto == tab5::ConnProto::SSH) {
-            char line[160];
-            snprintf(line, sizeof(line),
-                     "\x1b[2mSSH: connecting to %s@%s:%d ...\x1b[0m\r\n",
-                     pp->user, pp->host, pp->port);
-            term_write(line);
-            tab5::SshConfig scfg{
-                .host = pp->host,
-                .port = pp->port,
-                .user = pp->user,
-                .password = pp->password,
-                .cols = kCols,
-                .rows = kRows,
-                .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
-            };
-            auto c = std::make_unique<tab5::SshConnection>(scfg);
-            if (c->start(remote_rx)) conn = std::move(c);
+            return;
         }
-#endif
-#if CONFIG_TAB5_TELNET_ENABLED
-        else if (pp && pp->proto == tab5::ConnProto::Telnet) {
-            char line[160];
-            snprintf(line, sizeof(line),
-                     "\x1b[2mTelnet: connecting to %s:%d ...\x1b[0m\r\n",
-                     pp->host, pp->port);
-            term_write(line);
-            tab5::TelnetConfig tcfg{
-                .host = pp->host,
-                .port = pp->port,
-                .cols = kCols,
-                .rows = kRows,
-                .task_stack_bytes = CONFIG_TAB5_TELNET_RX_TASK_STACK,
-            };
-            auto c = std::make_unique<tab5::TelnetConnection>(tcfg);
-            if (c->start(remote_rx)) conn = std::move(c);
-        }
-#endif
-        else if (pp && pp->proto == tab5::ConnProto::UsbSerial) {
-            char line[160];
-            snprintf(line, sizeof(line),
-                     "\x1b[2mUSB-serial: opening FTDI ...\x1b[0m\r\n");
-            term_write(line);
-            tab5::UsbSerialConfig ucfg{
-                .baud      = CONFIG_TAB5_USB_SERIAL_BAUD,
-                .data_bits = 8,
-                .stop_bits = 0,   // 1 stop bit
-                .parity    = 0,   // none
-            };
-            auto c = std::make_unique<tab5::UsbSerialConnection>(ucfg);
-            if (c->start(remote_rx)) conn = std::move(c);
-        }
-
-        if (conn) {
-            char line[160];
-            snprintf(line, sizeof(line),
-                     "\x1b[32m%s connected\x1b[0m  %s\r\n",
-                     conn->kind(), conn->host_label());
-            term_write(line);
-            tab5::set_active_connection(conn.get());
-
-            // Supervisor: re-call start() on the same IConnection if the
-            // session drops (Wi-Fi blip, server reboot, idle timeout
-            // hitting TCP keepalive). Replays the current pty size so
-            // the remote starts at the right geometry after reconnect.
-            tab5::start_reconnect_supervisor(
-                conn.get(), remote_rx,
-                [] {
-                    Lock lk;
-                    return std::pair<uint16_t, uint16_t>{
-                        terminal.screen().cols(),
-                        terminal.screen().rows()};
-                });
-            // While the remote session is up, bypass the cooked-input
-            // filter — the remote echoes / handles BS itself, so doing
-            // CR→CRLF / BS-Space-BS locally would double-edit.
-            auto remote_send = [](std::span<const uint8_t> bytes) {
-                if (auto* c = tab5::active_connection()) c->send(bytes);
-            };
-            usb_sink = remote_send;
-#if CONFIG_TAB5_UART_INPUT_ENABLED
-            uart_sink = remote_send;
-#endif
-        } else if (pp) {
-            term_write("\x1b[31mRemote connect failed\x1b[0m  "
-                       "(falling back to local echo)\r\n");
-        }
-    }
+        cursor.erase();
+        (void)terminal.feed(bytes);
+        (void)terminal.render_dirty();
+        cursor.draw();
+    };
+    auto get_pty_size = [] {
+        Lock lk;
+        return std::pair<uint16_t, uint16_t>{
+            terminal.screen().cols(),
+            terminal.screen().rows()};
+    };
 
     tab5::start_status_bar([](std::function<void()> body) {
         Lock lk;
         body();
     });
 
-    // Soft keyboard. The byte sink writes through whatever usb_sink points
-    // at — SSH when connected, local-echo otherwise. (Both already bypass
-    // the cooked filter where appropriate.) Captured by reference so a
-    // post-boot sink change would be visible, though in practice we set it
-    // once above.
+    // Soft keyboard. The byte sink writes through usb_sink, which itself
+    // self-routes to active_connection() when one is up and falls back
+    // to the local-echo path otherwise — no rebind needed.
     static tab5::SoftKeyboard kbd([&](std::span<const uint8_t> bytes) {
         usb_sink(bytes);
     });
@@ -471,6 +547,11 @@ extern "C" void app_main(void) {
     { Lock lk; ui::invalidate(ui::kFullScreen); }
 
     tab5::start_touch_input([](const tab5::TouchPoint& p) {
+        // Boot-progress [Cancel] runs first so a tap on the status-panel
+        // button during a long Wi-Fi / VPN / SSH connect is captured
+        // before the menu / keyboard get a chance. handle_touch already
+        // hit-tests against the published button rect.
+        if (tab5::boot_progress::handle_touch(p)) return;
         Lock lk;
         if (tab5::menu.visible() && tab5::menu.handle_touch(p)) return;
         // Menu may return false to let the soft keyboard receive the
@@ -502,6 +583,27 @@ extern "C" void app_main(void) {
         ESP_LOGE(kTag, "USB HID input start failed");
     }
 #endif
+
+    // Boot sequence (Wi-Fi → VPN → remote auto-connect) runs on its own
+    // task so app_main can return to the idle loop and the user can see
+    // the status-panel progress / tap [Cancel] from second one. 6 KB
+    // stack covers the Wi-Fi STA assoc + SNTP + Tailscale handshake
+    // path; the SSH / Telnet dial spawns its own task internally.
+    {
+        auto* deps = new BootDeps{
+            .term_write   = term_write,
+            .remote_rx    = remote_rx,
+            .get_pty_size = get_pty_size,
+            .cols         = kCols,
+            .rows         = kRows,
+        };
+        BaseType_t ok = xTaskCreate(&boot_task, "boot_seq", 6144, deps,
+                                    tskIDLE_PRIORITY + 2, nullptr);
+        if (ok != pdPASS) {
+            ESP_LOGE(kTag, "boot task create failed");
+            delete deps;
+        }
+    }
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));

@@ -17,6 +17,7 @@ endif()
 idf_component_register(
     SRCS
         "app_main.cpp"
+        "boot_progress.cpp"
         "cooked_input.cpp"
         "cursor_renderer.cpp"
         "display_m5gfx.cpp"

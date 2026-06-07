@@ -12,6 +12,7 @@
 #include "M5Unified.h"
 
 #include "sdkconfig.h"
+#include "boot_progress.hpp"
 #include "connection.hpp"
 #if CONFIG_TAB5_WIFI_ENABLED
 #include "wifi_setup.hpp"
@@ -29,7 +30,11 @@ constexpr int kPanelX      = 1120;
 constexpr int kPanelY      = 0;
 constexpr int kPanelW      = 160;
 constexpr int kPanelH      = 720;
-constexpr int kRefreshMs   = 5000;
+constexpr int kRefreshMs       = 5000;
+// Faster cadence while boot_progress::is_busy() so a stage transition
+// and the [Cancel] / "Cancelling..." button label feel live without
+// boot_progress having to invalidate the panel across the UI lock.
+constexpr int kRefreshBusyMs   = 250;
 
 constexpr uint16_t kBgColor      = 0x0841;  // very dark grey
 constexpr uint16_t kFgColor      = 0xFFFF;
@@ -66,6 +71,11 @@ void status_render_impl() {
         d.drawString(s, kPanelX + 14, y);
         y += 26;
     };
+
+    // --- Boot / connect progress (only when not Idle) -----------
+    // Top of the panel so the user can't miss the in-flight stage and
+    // the Cancel button while Wi-Fi / VPN / SSH are coming up.
+    y = boot_progress::render_block(kPanelX, y, kPanelW);
 
     // --- Battery -------------------------------------------------
     int32_t bl = M5.Power.getBatteryLevel();
@@ -186,7 +196,10 @@ void status_task(void*) {
         } else {
             status_render_impl();
         }
-        vTaskDelay(pdMS_TO_TICKS(kRefreshMs));
+        const int ms = boot_progress::is_busy()
+                       ? kRefreshBusyMs
+                       : kRefreshMs;
+        vTaskDelay(pdMS_TO_TICKS(ms));
     }
 }
 

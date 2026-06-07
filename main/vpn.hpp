@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 
 namespace tab5::vpn {
 
@@ -20,11 +21,30 @@ enum class Kind { None, WireGuard, Tailscale };
 // Kind compiled in (independent of runtime up/down).
 Kind kind();
 
+// Step the start sequence walks through. Surfaced via the optional
+// `progress` callback so callers (e.g. the boot-progress status panel)
+// can show fine-grained feedback during the up-to-30 s wait.
+enum class StartStage { SyncingClock, Connecting, AwaitingAuth };
+
+using ProgressFn = std::function<void(StartStage, const char* detail)>;
+using ShouldAbortFn = std::function<bool()>;
+
 // Synchronise system time via SNTP and bring up the VPN. Blocks up to
 // `timeout_s` waiting for the tunnel to come up. Returns true if the
 // peer / Tailscale registration reached the "up" state. Safe to call
 // when no VPN backend is enabled (returns false).
-bool start(int timeout_s);
+//
+// `progress` (optional) is invoked when the start sequence enters a new
+// stage and again when the pending-auth URL becomes known.
+// `should_abort` (optional) is polled in the wait loops; when it returns
+// true the backend is stopped and start() returns false promptly.
+bool start(int timeout_s,
+           ProgressFn progress = nullptr,
+           ShouldAbortFn should_abort = nullptr);
+
+// Tear down whichever backend is running. Safe to call from a different
+// task than the one that called start(); intended for cancel.
+void stop();
 
 // Whether the VPN is currently established.
 bool is_up();
