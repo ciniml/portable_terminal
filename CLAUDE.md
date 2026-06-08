@@ -237,6 +237,18 @@ fingerprints; selectively rotating one entry isn't exposed yet.
   polling task drives `M5.update()` and emits `Down/Move/Up` edge events
   to a `TouchSink`. GT911 panel via M5GFX. The events go to ESP_LOGI for
   now; a soft-keyboard UI on top is a follow-up.
+- **Tab5 Keyboard** ([main/input_tab5_kbd.cpp](main/input_tab5_kbd.cpp)) —
+  the optional clip-on QWERTY keyboard wired to ExtPort1 (I2C addr 0x6D,
+  SDA=GPIO0, SCL=GPIO1, INT=GPIO50). Enabled with
+  `CONFIG_TAB5_KEYBOARD_INPUT_ENABLED=y`. Standalone driver speaking the
+  documented register protocol over `esp_driver_i2c` (`I2C_NUM_1`) +
+  GPIO ISR; no M5UnitUnified / M5Unit-KEYBOARD dependency (we tried
+  that path and hit an unresolved C++ static-init / FreeRTOS-heap
+  interaction under IDF 6.0). The firmware is put into HID mode
+  (`REG_MODE_KEYBOARD=1`) so it reports {modifier, keycode} pairs using
+  the standard USB HID Keyboard Page (0x07); those go through
+  [main/hid_translate.{hpp,cpp}](main/hid_translate.cpp), the same
+  scancode → terminal-byte translator used by the USB-A HID host driver.
 
 ## Reusable components
 

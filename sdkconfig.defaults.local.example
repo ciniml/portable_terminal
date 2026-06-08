@@ -17,6 +17,15 @@
 # CONFIG_TAB5_UART_INPUT_RX_GPIO=53
 # CONFIG_TAB5_UART_INPUT_BAUD=115200
 
+# --- Tab5 Keyboard (clip-on QWERTY on ExtPort1, I2C 0x6D) --------------
+# Enable once the keyboard is physically attached. Pulls in M5UnitUnified
+# and M5Unit-KEYBOARD via main/idf_component.yml. Default pins match
+# Tab5's stock ExtPort1 layout.
+# CONFIG_TAB5_KEYBOARD_INPUT_ENABLED=y
+# CONFIG_TAB5_KEYBOARD_I2C_SDA=0
+# CONFIG_TAB5_KEYBOARD_I2C_SCL=1
+# CONFIG_TAB5_KEYBOARD_INT_GPIO=50
+
 # --- Remote connection (SSH preferred, Telnet fallback) ---------------
 # When both are enabled, SSH is attempted first; Telnet is used only
 # when SSH start fails (or is disabled). Both require Wi-Fi enabled.

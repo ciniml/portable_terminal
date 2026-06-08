@@ -21,6 +21,8 @@ idf_component_register(
         "cooked_input.cpp"
         "cursor_renderer.cpp"
         "display_m5gfx.cpp"
+        "hid_translate.cpp"
+        "input_tab5_kbd.cpp"
         "input_usb_jtag.cpp"
         "input_uart.cpp"
         "input_touch.cpp"
@@ -57,6 +59,10 @@ idf_component_register(
         lwip
         espressif__usb
         espressif__usb_host_hid
+        # esp_driver_i2c is needed by main/input_tab5_kbd.cpp's standalone
+        # I2C driver for the Tab5 clip-on keyboard.
+        esp_driver_i2c
+        esp_driver_gpio
         # carried for later phases (unused yet):
         wireguard
         tailscale

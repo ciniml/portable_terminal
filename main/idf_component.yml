@@ -12,3 +12,11 @@ dependencies:
   # main/input_usb_hid.cpp so a regular USB keyboard plugged into the
   # Tab5 USB-A port acts as another input source.
   espressif/usb_host_hid: '*'
+
+  # The Tab5 clip-on keyboard (ExtPort1, I2C 0x6D) speaks a well-
+  # documented register protocol — see main/input_tab5_kbd.cpp — so
+  # we drive it directly via esp_driver_i2c + GPIO instead of pulling
+  # in M5UnitUnified / M5Unit-KEYBOARD. The earlier attempt to use
+  # those libraries tripped an unresolved C++ static-init / heap-caps
+  # interaction with our IDF 6.0 build (see git history Phase 7 step 6
+  # debug session); the standalone driver sidesteps that entirely.

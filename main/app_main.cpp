@@ -26,6 +26,7 @@
 #include "cursor_renderer.hpp"
 #include "display_m5gfx.hpp"
 #include "input_touch.hpp"
+#include "input_tab5_kbd.hpp"
 #include "input_usb_hid.hpp"
 #include "input_usb_jtag.hpp"
 #include "menu.hpp"
@@ -581,6 +582,16 @@ extern "C" void app_main(void) {
 #if CONFIG_TAB5_USB_HID_INPUT_ENABLED
     if (auto rc = tab5::start_usb_hid_input(usb_sink); !rc) {
         ESP_LOGE(kTag, "USB HID input start failed");
+    }
+#endif
+
+    // Tab5 clip-on keyboard on ExtPort1 (I2C 0x6D). Shares the same
+    // byte sink as USB-JTAG / UART / USB-HID — the HID-mode events are
+    // translated through main/hid_translate, so a single mapping covers
+    // both physical keyboards.
+#if CONFIG_TAB5_KEYBOARD_INPUT_ENABLED
+    if (auto rc = tab5::start_tab5_kbd_input(usb_sink); !rc) {
+        ESP_LOGE(kTag, "Tab5 keyboard input start failed");
     }
 #endif
 
