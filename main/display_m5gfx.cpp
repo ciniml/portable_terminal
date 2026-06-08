@@ -4,6 +4,7 @@
 #include <cstddef>
 
 #include "M5Unified.h"
+#include "sdkconfig.h"   // for CONFIG_TAB5_KEYBOARD_INPUT_ENABLED
 
 namespace tab5 {
 
@@ -86,7 +87,16 @@ term::Result<void> M5GfxDisplay::init() {
     auto cfg = M5.config();
     M5.begin(cfg);
 
+    // Rotation 1 = landscape with USB-C on the right; rotation 3 flips
+    // 180° so the LCD reads correctly with the clip-on Tab5 Keyboard
+    // attached (it docks on what is the "bottom" in rotation 1).
+    // M5Unified maps touch coordinates through the same rotation so
+    // taps land where you expect without extra work.
+#if CONFIG_TAB5_KEYBOARD_INPUT_ENABLED
+    M5.Display.setRotation(3);
+#else
     M5.Display.setRotation(1);
+#endif
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setFont(&fonts::lgfxJapanGothic_24);
     M5.Display.setTextSize(1);
