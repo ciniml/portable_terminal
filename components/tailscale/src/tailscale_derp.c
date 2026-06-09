@@ -546,14 +546,36 @@ static void derp_ka_task(void *arg)
 /* DERP-relayed packets are raw WireGuard UDP payloads, so we must hand
  * them to wireguardif_network_rx (the callback wireguardif registers on
  * its udp_pcb) — NOT tcpip_input, which would treat the bytes as IP.
- * wireguardif_network_rx eventually calls ip_input/tcp_input which must
- * run on the lwIP tcpip thread; we marshal the call via tcpip_callback.
+ * wireguardif_network_rx decrypts, then feeds the inner IP packet into
+ * ip_input → tcp_input — and that path is NOT thread-safe with the
+ * tcpip thread running concurrently on the same TCP PCB. Earlier we got
+ * away with calling it directly from this task for ICMP traffic (truly
+ * stateless), but the moment real TCP echo (SSH keystrokes) started
+ * flowing this raced with the tcpip thread inside tcp_receive and
+ * crashed at tcp_in.c:1582 on a NULL inseg.p. So we marshal the call
+ * via tcpip_callback now — it runs on the tcpip thread, which is the
+ * only one allowed to touch tcp_input. The pbuf is freed by
+ * wireguardif_network_rx via the WG netif's input path.
  * Synthetic source is in the 127.3.3.0/24 DERP pseudo range so replies
  * route back through our DERP output hook. */
 struct udp_pcb;  /* forward decl — opaque here */
 extern void wireguardif_network_rx(void *arg, struct udp_pcb *pcb,
                                     struct pbuf *p, const ip_addr_t *addr,
                                     u16_t port);
+
+typedef struct {
+    struct netif *nif;
+    struct pbuf  *p;
+    ip_addr_t     src_ip;
+    u16_t         src_port;
+} inject_ctx_t;
+
+static void inject_on_tcpip(void *arg)
+{
+    inject_ctx_t *ic = (inject_ctx_t *)arg;
+    wireguardif_network_rx(ic->nif->state, NULL, ic->p, &ic->src_ip, ic->src_port);
+    free(ic);
+}
 
 static void inject_wg_packet(int region_id, const uint8_t *data, size_t len)
 {
@@ -576,25 +598,31 @@ static void inject_wg_packet(int region_id, const uint8_t *data, size_t len)
     }
     memcpy(p->payload, data, len);
 
+    inject_ctx_t *ic = malloc(sizeof(*ic));
+    if (!ic) {
+        ESP_LOGW(TAG, "inject_wg_packet: ctx alloc failed");
+        pbuf_free(p);
+        return;
+    }
+    ic->nif = nif;
+    ic->p   = p;
     /* Synthesise the source endpoint as 127.3.3.40:<region> so the WG
-     * output hook routes replies back out via the DERP connection for the
-     * region the packet arrived on. */
-    ip_addr_t src_ip;
+     * output hook routes replies back out via the DERP connection for
+     * the region the packet arrived on. */
     ip4_addr_t src4;
     ip4addr_aton("127.3.3.40", &src4);
-    ip_addr_copy_from_ip4(src_ip, src4);
-    u16_t src_port = (u16_t)(region_id > 0 ? region_id : 1);
+    ip_addr_copy_from_ip4(ic->src_ip, src4);
+    ic->src_port = (u16_t)(region_id > 0 ? region_id : 1);
 
-    ESP_LOGD(TAG, "inject_wg: type=0x%02x len=%u to wg-netif",
+    ESP_LOGD(TAG, "inject_wg: type=0x%02x len=%u via tcpip_callback",
              data[0], (unsigned)len);
 
-    /* Call WG receive directly from the DERP recv task. Thread-safety note:
-     * lwIP normally requires API access on the tcpip thread, but we sidestep
-     * that here because (a) the WG netif's only inbound source IS this
-     * task, (b) outbound encryption goes through a TLS connection whose
-     * writes are serialized by that connection's tx_mutex. ICMP exchange
-     * across threads is stateless enough that direct call works in practice. */
-    wireguardif_network_rx(nif->state, NULL, p, &src_ip, src_port);
+    err_t err = tcpip_callback(inject_on_tcpip, ic);
+    if (err != ERR_OK) {
+        ESP_LOGW(TAG, "tcpip_callback -> %d (dropping packet)", (int)err);
+        pbuf_free(p);
+        free(ic);
+    }
 }
 
 /* ------------------------------------------------------------------ */
