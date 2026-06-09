@@ -41,6 +41,7 @@
 #include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -82,6 +83,35 @@ SemaphoreHandle_t        g_int_sem = nullptr;   // signalled by GPIO ISR
 int                      g_int_gpio = -1;
 std::atomic<bool>        g_isr_installed{false};
 
+// Software typematic state. The Tab5 Keyboard firmware in HID mode only
+// reports edge events (press: keycode != 0; release: keycode == 0), so
+// the host owns auto-repeat. Track the most recently-pressed key; once
+// it has been held for kRepeatInitialUs without a release, emit the
+// translated bytes again every kRepeatRateUs.
+//
+// Initial / rate values target a feel close to typical OS defaults
+// (~400 ms before first repeat, ~17 Hz thereafter).
+constexpr int64_t kRepeatInitialUs = 400 * 1000;
+constexpr int64_t kRepeatRateUs    =  60 * 1000;
+
+struct HeldKey {
+    bool    active        = false;
+    uint8_t modifier      = 0;
+    uint8_t keycode       = 0;
+    int64_t press_time_us = 0;
+    int64_t next_emit_us  = 0;   // when the next repeat should fire
+};
+HeldKey g_held;
+
+// Emit the bytes a (keycode, modifier) pair maps to, through the shared
+// HID translator and the active sink.
+void emit_hid(uint8_t modifier, uint8_t keycode) {
+    if (!g_sink) return;
+    uint8_t buf[hid_translate::kMaxBytes];
+    size_t  n = hid_translate::emit_key(keycode, modifier, buf);
+    if (n) g_sink(std::span<const uint8_t>(buf, n));
+}
+
 esp_err_t reg_read(uint8_t reg, uint8_t* buf, size_t len) {
     return i2c_master_transmit_receive(g_dev, &reg, 1, buf, len,
                                        /*timeout_ms=*/50);
@@ -99,15 +129,29 @@ void IRAM_ATTR isr_handler(void* /*arg*/) {
 
 [[noreturn]] void reader_task(void* /*arg*/) {
     while (true) {
-        // INT-driven when the GPIO ISR is up; otherwise 100 ms polling.
-        if (g_int_sem) {
-            xSemaphoreTake(g_int_sem, pdMS_TO_TICKS(1000));
+        // Wake when (a) the firmware signals an event via INT, or
+        // (b) a held key needs its next repeat tick. When no key is
+        // held we just idle for ~1 s.
+        TickType_t wait;
+        if (g_held.active) {
+            int64_t now = esp_timer_get_time();
+            int64_t remaining = g_held.next_emit_us - now;
+            wait = (remaining <= 0)
+                       ? (TickType_t)0
+                       : (TickType_t)(pdMS_TO_TICKS(remaining / 1000) + 1);
         } else {
-            vTaskDelay(pdMS_TO_TICKS(100));
+            wait = pdMS_TO_TICKS(1000);
+        }
+
+        if (g_int_sem) {
+            xSemaphoreTake(g_int_sem, wait);
+        } else {
+            vTaskDelay(wait ? wait : 1);
         }
 
         // Drain everything the firmware queued. EVENT_NUM auto-decrements
         // on each HID_EVENT read, so this loop terminates naturally.
+        bool got_event = false;
         for (int safety = 32; safety > 0; --safety) {
             uint8_t count = 0;
             if (reg_read(kRegEventNum, &count, 1) != ESP_OK) break;
@@ -118,19 +162,49 @@ void IRAM_ATTR isr_handler(void* /*arg*/) {
             const uint8_t modifier = ev[0];
             const uint8_t keycode  = ev[1];
             if (keycode == kHidEventEmpty && modifier == kHidEventEmpty) break;
-            if (keycode == 0) continue;   // modifier-only release event
+            got_event = true;
 
-            uint8_t buf[hid_translate::kMaxBytes];
-            size_t  n = hid_translate::emit_key(keycode, modifier, buf);
-            if (n && g_sink) {
-                g_sink(std::span<const uint8_t>(buf, n));
+            if (keycode == 0) {
+                // Release / modifier-only event — drop any held repeat.
+                // (Modifier-only press events also cancel any pending
+                // repeat from the previous key, which matches USB HID
+                // behaviour where typing into a modifier sticks until a
+                // new non-modifier press comes in.)
+                g_held.active = false;
+                continue;
+            }
+
+            // New (or replacement) press. Track it for repeat and emit
+            // the first instance now.
+            const int64_t now = esp_timer_get_time();
+            g_held = {
+                /*active*/        true,
+                /*modifier*/      modifier,
+                /*keycode*/       keycode,
+                /*press_time_us*/ now,
+                /*next_emit_us*/  now + kRepeatInitialUs,
+            };
+            emit_hid(modifier, keycode);
+        }
+
+        // Honour typematic on the held key. We may emit several repeats
+        // in one wake-up if the task overslept (e.g. heavy lock
+        // contention); cap at 4 per loop so we don't spam in one batch.
+        if (g_held.active) {
+            int64_t now = esp_timer_get_time();
+            for (int i = 0; i < 4 && now >= g_held.next_emit_us; ++i) {
+                emit_hid(g_held.modifier, g_held.keycode);
+                g_held.next_emit_us += kRepeatRateUs;
+                now = esp_timer_get_time();
             }
         }
 
-        // Release the INT pin so the next event triggers another ISR.
+        // Release the INT pin so the next firmware event re-asserts it.
         // Per the datasheet writing 0 to INT_STAT clears the status and
-        // releases the INT signal.
-        (void)reg_write(kRegIntStat, 0x00);
+        // releases the INT signal. We only need to clear it when the
+        // firmware actually queued something this iteration — purely-
+        // repeat wakes don't have a pending INT to ack.
+        if (got_event) (void)reg_write(kRegIntStat, 0x00);
     }
 }
 
