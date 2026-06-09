@@ -105,6 +105,16 @@ template <class TerminalApply>
 tab5::ByteSink make_source_sink(TerminalApply&& apply) {
     auto state = std::make_shared<tab5::CookedInputFilter>();
     return [state, apply](std::span<const uint8_t> bytes) mutable {
+        // When the settings menu is on screen it captures all physical
+        // keyboard input — arrow keys for nav, Enter to activate, ESC
+        // to close, plus printable/BS for the focused text field.
+        // Bytes are swallowed here so they don't bleed through to the
+        // remote session or the local terminal beneath.
+        if (tab5::menu.visible()) {
+            Lock lk;
+            tab5::menu.feed(bytes);
+            return;
+        }
         if (auto* c = tab5::active_connection()) {
             c->send(bytes);
             return;

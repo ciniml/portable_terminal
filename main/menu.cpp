@@ -130,6 +130,7 @@ Menu::Menu() = default;
 void Menu::open() {
     if (state_ != State::Hidden) return;
     state_ = State::ProfileList;
+    focused_row_ = 0;
     // The ProfileList view paints full screen (above the soft kbd);
     // hide the kbd so its panel doesn't show through.
     if (kbd_ && kbd_->visible()) kbd_->toggle();
@@ -334,7 +335,15 @@ void Menu::render_profile_list() {
         uint16_t bg = sel ? kRowBgSelected : kRowBg;
         if (press_row) bg = static_cast<uint16_t>((bg >> 1) & 0x7BEF);
         d.fillRoundRect(kRowX, y, kRowW, kRowH, 10, bg);
-        d.drawRoundRect(kRowX, y, kRowW, kRowH, 10, kRowEdge);
+        // Keyboard-focused row: 3 px accent border on top of the
+        // default edge. Distinct from `sel` (auto-connect profile).
+        const bool kbd_focus = (i == focused_row_);
+        d.drawRoundRect(kRowX, y, kRowW, kRowH, 10,
+                        kbd_focus ? kAccent : kRowEdge);
+        if (kbd_focus) {
+            d.drawRoundRect(kRowX + 1, y + 1, kRowW - 2, kRowH - 2, 9, kAccent);
+            d.drawRoundRect(kRowX + 2, y + 2, kRowW - 4, kRowH - 4, 8, kAccent);
+        }
 
         if (sel) {
             d.fillRect(kRowX + 6, y + 8, 6, kRowH - 16, kAccent);
@@ -418,7 +427,13 @@ void Menu::render_tofu_list() {
 
         uint16_t bg = kRowBg;
         d.fillRoundRect(kRowX, y, kRowW, kTofuRowH, 10, bg);
-        d.drawRoundRect(kRowX, y, kRowW, kTofuRowH, 10, kRowEdge);
+        const bool kbd_focus = (static_cast<int>(i) == focused_row_);
+        d.drawRoundRect(kRowX, y, kRowW, kTofuRowH, 10,
+                        kbd_focus ? kAccent : kRowEdge);
+        if (kbd_focus) {
+            d.drawRoundRect(kRowX + 1, y + 1, kRowW - 2, kTofuRowH - 2, 9, kAccent);
+            d.drawRoundRect(kRowX + 2, y + 2, kRowW - 4, kTofuRowH - 4, 8, kAccent);
+        }
 
         const auto& e = tofu_.entries[i];
         char line1[96];
@@ -905,6 +920,7 @@ void Menu::open_tofu() {
     tofu_.pressed_idx  = -1;
     tofu_.pressed_btn  = -1;
     tofu_.pressed_back = false;
+    focused_row_ = 0;
     state_ = State::TofuList;
     render();
 }
@@ -1123,6 +1139,168 @@ void Menu::wifi_feed(std::span<const uint8_t> bytes) {
         }
     }
     if (changed) render();
+}
+
+// ---------- physical-keyboard navigation ----------
+
+namespace {
+// VT arrow / Enter / Esc helpers. Arrow keys come in as 3-byte
+// sequences (\x1B [ A / B / C / D).
+constexpr uint8_t kEsc = 0x1B;
+
+// Cycle a 0-based index inside [0, count).
+int wrap_dec(int i, int count) {
+    if (count <= 0) return 0;
+    return (i <= 0) ? count - 1 : i - 1;
+}
+int wrap_inc(int i, int count) {
+    if (count <= 0) return 0;
+    return (i + 1) % count;
+}
+}  // namespace
+
+void Menu::feed(std::span<const uint8_t> bytes) {
+    if (state_ == State::Hidden) return;
+
+    bool dirty = false;
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        uint8_t b = bytes[i];
+
+        // Decode VT escapes BEFORE handing single ESC to editor_feed /
+        // wifi_feed (their lone-ESC behaviour is "cancel and close"; we
+        // do NOT want an arrow key to be misread that way).
+        if (b == kEsc) {
+            if (i + 2 < bytes.size() && bytes[i+1] == '[') {
+                uint8_t arrow = bytes[i+2];
+                if (arrow == 'A' || arrow == 'B' ||
+                    arrow == 'C' || arrow == 'D') {
+                    // Arrow nav. Up / Down move selection / focus;
+                    // Left / Right are reserved for future field-internal
+                    // editing — swallow them for now.
+                    if (arrow == 'A') { nav_up();   dirty = false; }
+                    else if (arrow == 'B') { nav_down(); dirty = false; }
+                    i += 2;
+                    continue;
+                }
+                // Unknown CSI sequence — skip the "[" and the final byte.
+                if (i + 2 < bytes.size()) i += 2;
+                continue;
+            }
+            // Solitary ESC — cancel / pop the current view.
+            nav_esc();
+            return;
+        }
+
+        if (b == '\r' || b == '\n') {
+            nav_enter();
+            continue;
+        }
+
+        // Single-byte fallthrough: text fields (BS / printable / etc).
+        // editor_feed and wifi_feed do their own render() when the value
+        // changes, so we don't double-paint.
+        uint8_t one = b;
+        std::span<const uint8_t> single{&one, 1};
+        switch (state_) {
+        case State::ProfileEditor: editor_feed(single); break;
+        case State::WifiEdit:      wifi_feed(single);   break;
+        default: break;
+        }
+    }
+    if (dirty) render();
+}
+
+void Menu::nav_up() {
+    switch (state_) {
+    case State::ProfileEditor:
+        editor_.focused_field = wrap_dec(editor_.focused_field, kFieldCount);
+        render();
+        break;
+    case State::WifiEdit:
+        wifi_.focused_field = wrap_dec(wifi_.focused_field, 3);
+        render();
+        break;
+    case State::ProfileList: {
+        int n = profiles.count();
+        if (n > 0) { focused_row_ = wrap_dec(focused_row_, n); render(); }
+        break;
+    }
+    case State::TofuList: {
+        int n = static_cast<int>(tofu_.entries.size());
+        if (n > 0) { focused_row_ = wrap_dec(focused_row_, n); render(); }
+        break;
+    }
+    default: break;
+    }
+}
+
+void Menu::nav_down() {
+    switch (state_) {
+    case State::ProfileEditor:
+        editor_.focused_field = wrap_inc(editor_.focused_field, kFieldCount);
+        render();
+        break;
+    case State::WifiEdit:
+        wifi_.focused_field = wrap_inc(wifi_.focused_field, 3);
+        render();
+        break;
+    case State::ProfileList: {
+        int n = profiles.count();
+        if (n > 0) { focused_row_ = wrap_inc(focused_row_, n); render(); }
+        break;
+    }
+    case State::TofuList: {
+        int n = static_cast<int>(tofu_.entries.size());
+        if (n > 0) { focused_row_ = wrap_inc(focused_row_, n); render(); }
+        break;
+    }
+    default: break;
+    }
+}
+
+void Menu::nav_enter() {
+    switch (state_) {
+    case State::ProfileList:
+        if (focused_row_ >= 0 && focused_row_ < profiles.count()) {
+            open_editor(focused_row_);
+        }
+        break;
+    case State::TofuList:
+        // No primary "Enter" action; touch Delete is the destructive
+        // path. Leaving this as a no-op keeps Enter safe.
+        break;
+    case State::ProfileEditor:
+        // In a text field, Enter advances focus to the next field. From
+        // a Toggle field it cycles the toggle's value.
+        if (editor_.focused_field >= 0 &&
+            editor_.focused_field < kFieldCount &&
+            kFields[editor_.focused_field].kind == FieldKind::Toggle) {
+            editor_.working.proto = next_proto(editor_.working.proto);
+            render();
+        } else {
+            nav_down();
+        }
+        break;
+    case State::WifiEdit:
+        nav_down();
+        break;
+    default: break;
+    }
+}
+
+void Menu::nav_esc() {
+    switch (state_) {
+    case State::ProfileEditor: close_editor(/*save=*/false); break;
+    case State::WifiEdit:      close_wifi(/*save=*/false);   break;
+    case State::TofuList:
+        // Pop back to the profile list.
+        state_ = State::ProfileList;
+        focused_row_ = 0;
+        if (repaint_) repaint_();
+        break;
+    case State::ProfileList: close(); break;
+    default: break;
+    }
 }
 
 void Menu::editor_feed(std::span<const uint8_t> bytes) {

@@ -54,6 +54,14 @@ public:
     // installing the swapped sink.
     void editor_feed(std::span<const uint8_t> bytes);
 
+    // Bytes from a *physical* keyboard (Tab5 clip-on / USB-HID / UART /
+    // USB-JTAG) while the menu is on screen. Recognises VT escape
+    // sequences for arrow-key navigation, Enter to activate the focused
+    // row / next field, and ESC to close the current view. Other bytes
+    // forward to editor_feed / wifi_feed for the active text field.
+    // Caller must hold the UI lock — feed() may call render() inline.
+    void feed(std::span<const uint8_t> bytes);
+
     // Called by the menu whenever it needs a redraw (state change,
     // selection update). Caller installs a lambda that takes the lock,
     // re-marks the obscured region if closing, then calls render().
@@ -76,6 +84,10 @@ private:
     State   state_ = State::Hidden;
     int     pressed_idx_ = -1;   // currently-touched list row, -1 if none
     int     pressed_btn_ = -1;   // -1 generic / 0..N button id within row
+    int     focused_row_ = 0;    // keyboard-selected list row (ProfileList /
+                                 // TofuList); independent of pressed_idx_
+                                 // and of profiles.selected() (the auto-
+                                 // connect flag).
     Repaint repaint_;
 
     // ---- ProfileEditor state ----
@@ -131,6 +143,12 @@ private:
     void open_wifi();
     void close_wifi(bool save);
     void wifi_feed(std::span<const uint8_t> bytes);
+
+    // Physical-keyboard navigation helpers — called from feed().
+    void nav_up();
+    void nav_down();
+    void nav_enter();
+    void nav_esc();
 
     // Hit-test helpers — return -1 if no hit.
     int   hit_row(int y) const;            // y → row index, -1 outside list
