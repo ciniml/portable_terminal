@@ -75,6 +75,7 @@ bool wireguard_esp32_is_peer_up(void);
  * ============================================================ */
 
 #include "lwip/ip_addr.h"
+#include "lwip/err.h"      /* err_t, for wireguard_esp32_udp_send() */
 
 /**
  * @brief Start WireGuard in managed mode (no pre-configured peer).
@@ -179,6 +180,58 @@ typedef void (*wireguard_derp_output_fn)(const uint8_t *peer_pub,
  * of being sent via UDP.
  */
 void wireguard_esp32_set_derp_output(wireguard_derp_output_fn fn);
+
+/**
+ * @brief Callback type for inbound Tailscale DISCO packets.
+ *
+ * wireguardif_network_rx peeks at the first 6 bytes of each UDP packet
+ * arriving at the WG listen port. If they match the DISCO magic
+ * "TS💬" (0x54 0x53 0xF0 0x9F 0x92 0xAC), the packet is handed to this
+ * callback instead of being treated as a WireGuard message. Same
+ * applies to packets injected from the DERP relay path
+ * (inject_wg_packet → wireguardif_network_rx).
+ *
+ * @param data      Full UDP payload starting with the 6-byte DISCO magic.
+ * @param len       Length of the payload (>= 6 + 32 + 24 + 16 already
+ *                  verified by the caller).
+ * @param src_ip    Source IP address from the UDP datagram.
+ * @param src_port  Source port from the UDP datagram. For DERP-injected
+ *                  packets this is the DERP region in the synthetic
+ *                  127.3.3.40:<region> tuple; callers can detect that
+ *                  case by checking src_ip.
+ */
+typedef void (*wireguard_disco_input_fn)(const uint8_t *data, size_t len,
+                                          const ip_addr_t *src_ip,
+                                          uint16_t src_port);
+
+/**
+ * @brief Register a DISCO inbound dispatcher. Passing NULL unregisters.
+ *
+ * Idempotent. The function is called from the lwIP tcpip thread (same
+ * thread as wireguardif_network_rx).
+ */
+void wireguard_esp32_set_disco_input(wireguard_disco_input_fn fn);
+
+/**
+ * @brief Send an arbitrary UDP payload via the WireGuard udp_pcb.
+ *
+ * Used by the DISCO sender so probe packets share the same source IP /
+ * port as ordinary WireGuard data (default CONFIG_TAILSCALE_LISTEN_PORT
+ * = 41641). This is what convinces the peer's magicsock to flip its
+ * bestAddr to our direct endpoint instead of routing replies via DERP.
+ *
+ * Safe to call from any thread; internally marshals to the tcpip thread
+ * if needed (delegated to the underlying udp_sendto path which is
+ * documented as needing the core lock).
+ *
+ * @param dst       Destination IP.
+ * @param dst_port  Destination UDP port.
+ * @param data      Payload bytes (will be copied into a pbuf).
+ * @param len       Payload length.
+ * @return ERR_OK on success, lwIP err_t otherwise.
+ */
+err_t wireguard_esp32_udp_send(const ip_addr_t *dst, uint16_t dst_port,
+                               const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

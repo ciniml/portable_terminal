@@ -1,265 +1,335 @@
 /*
- * Tailscale DISCO path-discovery protocol.
+ * Tailscale DISCO — minimum-viable implementation for direct UDP.
+ *
+ * See tailscale_disco.h for the wire format. This module is the data-
+ * plane glue: a Ping sender, a Pong responder, and a Pong handler that
+ * promotes the verified address to the WireGuard peer's endpoint.
+ *
+ * Threading: ts_disco_rx() runs on the lwIP tcpip thread (called from
+ * wireguardif_network_rx). ts_disco_send_ping() may be called from any
+ * thread; wireguard_esp32_udp_send() handles the marshalling.
+ *
+ * Scope: Ping/Pong over the WG UDP port. CallMeMaybe and explicit
+ * trust-window expiry are deliberately left out (see plan file's
+ * "Open risks" section).
+ *
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
 #include "tailscale_disco.h"
-#include "tailscale_keys.h"
+#include "tailscale_nacl.h"
 
 #include "wireguard_esp32.h"
+#include "crypto.h"  /* wireguard_x25519, wireguard_random_bytes */
 
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-
-#include "lwip/sockets.h"
-#include "lwip/ip_addr.h"
-
-/* crypto primitives from wireguard component */
-#include "crypto.h"
-#include "wireguard-platform.h"
+#include "esp_random.h"
+#include "lwip/inet.h"
 
 #include <string.h>
-#include <stdlib.h>
 
 static const char *TAG = "ts_disco";
 
 /* ------------------------------------------------------------------ */
-/* DISCO packet layout (simplified — Tailscale spec):                  */
-/*                                                                      */
-/* All DISCO packets begin with:                                        */
-/*   "TS💬" magic (6 bytes: 0x54 0x53 0xf0 0x9f 0x92 0xac)            */
-/*   nonce (24 bytes)                                                   */
-/*   box = XChaCha20-Poly1305(                                          */
-/*            key = x25519(our_disco_priv, peer_disco_pub),             */
-/*            plaintext = [1-byte type][payload]                        */
-/*         )                                                            */
+/* Wire constants                                                       */
 /* ------------------------------------------------------------------ */
 
-#define DISCO_MAGIC_LEN   6
-#define DISCO_NONCE_LEN   24
-#define DISCO_OVERHEAD    (DISCO_MAGIC_LEN + DISCO_NONCE_LEN + 16)
+#define DISCO_MAGIC_LEN     6
+#define DISCO_SENDER_LEN    32
+#define DISCO_NONCE_LEN     24
+#define DISCO_TAG_LEN       16
+#define DISCO_HEADER_LEN    (DISCO_MAGIC_LEN + DISCO_SENDER_LEN + DISCO_NONCE_LEN)
+
+#define DISCO_INNER_HDR_LEN 2   /* type + version */
+#define DISCO_TXID_LEN      12
+
+#define DISCO_PING_BODY_LEN (DISCO_TXID_LEN + 32 /* NodeKey */)
+#define DISCO_PONG_BODY_LEN (DISCO_TXID_LEN + 16 /* SrcIP */ + 2 /* SrcPort */)
 
 static const uint8_t DISCO_MAGIC[DISCO_MAGIC_LEN] =
-    { 0x54, 0x53, 0xf0, 0x9f, 0x92, 0xac };
+    { 0x54, 0x53, 0xF0, 0x9F, 0x92, 0xAC };
 
 /* ------------------------------------------------------------------ */
-/* Ping payload: [8-byte tx ID][4-byte node_key truncated] = 12 bytes  */
-/* (Actual Tailscale ping: only the 8-byte tx ID matters for matching) */
+/* State                                                                */
 /* ------------------------------------------------------------------ */
 
-#define DISCO_TASK_STACK  3072
-#define DISCO_TASK_PRIO   4
+#define DISCO_PENDING_MAX 16
 
 typedef struct {
-    uint8_t  peer_index;
-    uint8_t  peer_disco_pub[32];
-    ip_addr_t endpoint;
-    uint16_t  port;
-    uint8_t  tx_id[8];
-} disco_peer_ctx_t;
+    bool     in_use;
+    uint8_t  tx_id[DISCO_TXID_LEN];
+    uint8_t  peer_disco_pub[32];   /* used to verify Pong sender identity */
+    uint8_t  wg_peer_index;
+} pending_ping_t;
 
-#define DISCO_MAX_PENDING 8
-static disco_peer_ctx_t s_pending[DISCO_MAX_PENDING];
-static int              s_pending_count = 0;
+static uint8_t         s_disco_priv[32];
+static uint8_t         s_disco_pub[32];
+static uint8_t         s_node_pub[32];
+static bool            s_inited = false;
+static pending_ping_t  s_pending[DISCO_PENDING_MAX];
 
-static int              s_sock = -1;
-static TaskHandle_t     s_task = NULL;
-static bool             s_running = false;
-static uint8_t          s_disco_priv[32];
-static uint8_t          s_disco_pub[32];
+/* Forward decl — registered with wireguardif as the DISCO input callback. */
+static void ts_disco_rx(const uint8_t *data, size_t len,
+                        const ip_addr_t *src_ip, uint16_t src_port);
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                              */
+/* Pending Ping bookkeeping                                             */
 /* ------------------------------------------------------------------ */
 
-static void build_disco_box(const uint8_t our_priv[32],
-                            const uint8_t peer_pub[32],
-                            const uint8_t *payload, size_t plen,
-                            uint8_t *out,        /* DISCO_OVERHEAD + plen */
-                            const uint8_t nonce[DISCO_NONCE_LEN])
+static pending_ping_t *pending_alloc(void)
 {
-    /* Shared secret via x25519 */
-    uint8_t shared[32];
-    wireguard_x25519(shared, our_priv, peer_pub);
-
-    /* Box: XChaCha20-Poly1305(shared, nonce, payload) */
-    wireguard_xaead_encrypt(out, payload, plen, NULL, 0, nonce, shared);
+    for (int i = 0; i < DISCO_PENDING_MAX; i++) {
+        if (!s_pending[i].in_use) return &s_pending[i];
+    }
+    /* Overflow: recycle slot 0. The lost ping just won't trigger an
+     * endpoint update; the next netmap apply will issue another. */
+    return &s_pending[0];
 }
 
-static bool open_disco_box(const uint8_t our_priv[32],
-                           const uint8_t peer_pub[32],
-                           const uint8_t *box, size_t box_len,
-                           uint8_t *out,   /* box_len - 16 */
-                           const uint8_t nonce[DISCO_NONCE_LEN])
+static pending_ping_t *pending_find(const uint8_t tx_id[DISCO_TXID_LEN])
 {
-    uint8_t shared[32];
-    wireguard_x25519(shared, our_priv, peer_pub);
-    return wireguard_xaead_decrypt(out, box, box_len, NULL, 0, nonce, shared);
-}
-
-/* ------------------------------------------------------------------ */
-/* Receive task                                                         */
-/* ------------------------------------------------------------------ */
-
-static void disco_recv_task(void *arg)
-{
-    static uint8_t buf[512];
-
-    while (s_running) {
-        struct sockaddr_in src_addr = {0};
-        socklen_t addr_len = sizeof(src_addr);
-        int n = recvfrom(s_sock, buf, sizeof(buf), 0,
-                         (struct sockaddr *)&src_addr, &addr_len);
-        if (n < 0) {
-            if (!s_running) break;
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        /* Validate magic */
-        if ((size_t)n < DISCO_MAGIC_LEN + DISCO_NONCE_LEN + 1 + 16) continue;
-        if (memcmp(buf, DISCO_MAGIC, DISCO_MAGIC_LEN) != 0) continue;
-
-        const uint8_t *nonce     = buf + DISCO_MAGIC_LEN;
-        const uint8_t *box       = nonce + DISCO_NONCE_LEN;
-        size_t         box_len   = (size_t)n - DISCO_MAGIC_LEN - DISCO_NONCE_LEN;
-
-        /* We need the sender's DISCO public key to open the box.
-         * In a full implementation, we would look up by src_addr in a peer
-         * table populated from the netmap.  Here we try all pending peers. */
-        for (int i = 0; i < s_pending_count; i++) {
-            uint8_t plain[64] = {0};
-            if (!open_disco_box(s_disco_priv, s_pending[i].peer_disco_pub,
-                                box, box_len, plain, nonce)) {
-                continue;
-            }
-
-            uint8_t msg_type = plain[0];
-            if (msg_type == DISCO_MSG_PONG) {
-                /* Pong received — upgrade WireGuard endpoint to direct path */
-                ip_addr_t direct_ip;
-                ip4_addr_t ip4;
-                ip4.addr = src_addr.sin_addr.s_addr;
-                ip_addr_copy_from_ip4(direct_ip, ip4);
-                uint16_t direct_port = ntohs(src_addr.sin_port);
-
-                ESP_LOGI(TAG, "DISCO Pong from peer %d — direct path established",
-                         s_pending[i].peer_index);
-                wireguard_esp32_update_endpoint(s_pending[i].peer_index,
-                                               &direct_ip, direct_port);
-
-                /* Remove from pending */
-                s_pending[i] = s_pending[--s_pending_count];
-            }
-            break;
+    for (int i = 0; i < DISCO_PENDING_MAX; i++) {
+        if (s_pending[i].in_use &&
+            memcmp(s_pending[i].tx_id, tx_id, DISCO_TXID_LEN) == 0) {
+            return &s_pending[i];
         }
     }
+    return NULL;
+}
 
-    vTaskDelete(NULL);
+/* ------------------------------------------------------------------ */
+/* Wire packing / unpacking                                             */
+/* ------------------------------------------------------------------ */
+
+/* Build the full DISCO frame for `inner_pt` (the plaintext post the
+ * 2-byte type/version header) destined for `peer_disco_pub`. `out`
+ * receives DISCO_HEADER_LEN + DISCO_TAG_LEN + inner_pt_len bytes. */
+static esp_err_t build_disco_frame(const uint8_t peer_disco_pub[32],
+                                   const uint8_t *inner_pt, size_t inner_pt_len,
+                                   uint8_t *out, size_t out_cap, size_t *out_len)
+{
+    size_t need = DISCO_HEADER_LEN + DISCO_TAG_LEN + inner_pt_len;
+    if (out_cap < need) return ESP_ERR_NO_MEM;
+
+    uint8_t nonce[DISCO_NONCE_LEN];
+    esp_fill_random(nonce, sizeof(nonce));
+
+    uint8_t shared[32];
+    wireguard_x25519(shared, s_disco_priv, peer_disco_pub);
+
+    memcpy(out + 0,                                   DISCO_MAGIC, DISCO_MAGIC_LEN);
+    memcpy(out + DISCO_MAGIC_LEN,                     s_disco_pub, DISCO_SENDER_LEN);
+    memcpy(out + DISCO_MAGIC_LEN + DISCO_SENDER_LEN,  nonce,       DISCO_NONCE_LEN);
+
+    /* Box output appended after the header: tag(16) || ct(inner_pt_len). */
+    ts_nacl_box_seal(shared, nonce, inner_pt, inner_pt_len,
+                     out + DISCO_HEADER_LEN);
+
+    *out_len = need;
+    return ESP_OK;
+}
+
+/* Decrypt the box part of a received DISCO frame. `inner_pt_buf` gets
+ * the plaintext (including the 2-byte type/version header). Returns
+ * the plaintext length, or -1 on tag-verify failure. */
+static int open_disco_frame(const uint8_t *frame, size_t frame_len,
+                            const uint8_t sender_pub[32],
+                            uint8_t *inner_pt_buf, size_t buf_cap)
+{
+    if (frame_len < DISCO_HEADER_LEN + DISCO_TAG_LEN) return -1;
+    const uint8_t *nonce = frame + DISCO_MAGIC_LEN + DISCO_SENDER_LEN;
+    const uint8_t *box   = frame + DISCO_HEADER_LEN;
+    size_t         boxlen = frame_len - DISCO_HEADER_LEN;
+    size_t         pt_len = boxlen - DISCO_TAG_LEN;
+    if (buf_cap < pt_len) return -1;
+
+    uint8_t shared[32];
+    wireguard_x25519(shared, s_disco_priv, sender_pub);
+    if (!ts_nacl_box_open(shared, nonce, box, boxlen, inner_pt_buf)) {
+        return -1;
+    }
+    return (int)pt_len;
 }
 
 /* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
 
-esp_err_t ts_disco_start(const uint8_t disco_priv[32],
-                         const uint8_t disco_pub[32])
+esp_err_t ts_disco_init(const uint8_t disco_priv[32],
+                        const uint8_t disco_pub[32],
+                        const uint8_t node_pub[32])
 {
+    if (!disco_priv || !disco_pub || !node_pub) return ESP_ERR_INVALID_ARG;
     memcpy(s_disco_priv, disco_priv, 32);
     memcpy(s_disco_pub,  disco_pub,  32);
+    memcpy(s_node_pub,   node_pub,   32);
+    memset(s_pending,    0, sizeof(s_pending));
+    s_inited = true;
 
-    s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s_sock < 0) {
-        ESP_LOGE(TAG, "UDP socket creation failed");
-        return ESP_FAIL;
-    }
-
-    struct sockaddr_in bind_addr = {
-        .sin_family      = AF_INET,
-        .sin_addr.s_addr = INADDR_ANY,
-        .sin_port        = 0, /* ephemeral */
-    };
-    if (bind(s_sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        close(s_sock);
-        s_sock = -1;
-        ESP_LOGE(TAG, "UDP bind failed");
-        return ESP_FAIL;
-    }
-
-    s_running = true;
-    xTaskCreate(disco_recv_task, "ts_disco_rx", DISCO_TASK_STACK,
-                NULL, DISCO_TASK_PRIO, &s_task);
-
-    ESP_LOGI(TAG, "DISCO started");
+    wireguard_esp32_set_disco_input(ts_disco_rx);
+    ESP_LOGI(TAG, "DISCO ready (disco_pub %02x%02x%02x%02x... node_pub %02x%02x%02x%02x...)",
+             disco_pub[0], disco_pub[1], disco_pub[2], disco_pub[3],
+             node_pub[0],  node_pub[1],  node_pub[2],  node_pub[3]);
     return ESP_OK;
 }
 
-esp_err_t ts_disco_ping(uint8_t peer_index,
-                        const uint8_t peer_disco_pub[32],
-                        const ip_addr_t *endpoint,
-                        uint16_t port)
+esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
+                             const uint8_t peer_node_pub[32],
+                             const uint8_t peer_disco_pub[32],
+                             const ip_addr_t *cand_ip, uint16_t cand_port)
 {
-    if (s_sock < 0 || ip_addr_isany(endpoint) || port == 0) {
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    if (!peer_disco_pub || !cand_ip || cand_port == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_pending_count >= DISCO_MAX_PENDING) {
-        ESP_LOGW(TAG, "DISCO pending table full");
-        return ESP_ERR_NO_MEM;
+
+    /* Inner plaintext: [type=Ping][ver=0] || TxID[12] || NodeKey[32] */
+    uint8_t inner[DISCO_INNER_HDR_LEN + DISCO_PING_BODY_LEN];
+    inner[0] = DISCO_MSG_PING;
+    inner[1] = 0;  /* version */
+    uint8_t *tx_id_field = inner + DISCO_INNER_HDR_LEN;
+    esp_fill_random(tx_id_field, DISCO_TXID_LEN);
+    memcpy(inner + DISCO_INNER_HDR_LEN + DISCO_TXID_LEN, s_node_pub, 32);
+    (void)peer_node_pub;  /* not needed in the Ping body; we send our own */
+
+    uint8_t frame[DISCO_HEADER_LEN + DISCO_TAG_LEN +
+                  DISCO_INNER_HDR_LEN + DISCO_PING_BODY_LEN];
+    size_t  frame_len = 0;
+    esp_err_t err = build_disco_frame(peer_disco_pub, inner, sizeof(inner),
+                                      frame, sizeof(frame), &frame_len);
+    if (err != ESP_OK) return err;
+
+    err_t lwerr = wireguard_esp32_udp_send(cand_ip, cand_port, frame, frame_len);
+    if (lwerr != ERR_OK) {
+        ESP_LOGW(TAG, "udp_send -> %d for ping to %08x:%u",
+                 (int)lwerr,
+                 (unsigned)ip_2_ip4(cand_ip)->addr, (unsigned)cand_port);
+        return ESP_FAIL;
     }
 
-    /* Generate random 8-byte tx ID */
-    uint8_t tx_id[8];
-    wireguard_random_bytes(tx_id, sizeof(tx_id));
-
-    /* Build DISCO Ping payload: [type=0x01][8-byte tx_id] */
-    uint8_t payload[9];
-    payload[0] = DISCO_MSG_PING;
-    memcpy(payload + 1, tx_id, 8);
-
-    /* Generate random nonce */
-    uint8_t nonce[DISCO_NONCE_LEN];
-    wireguard_random_bytes(nonce, DISCO_NONCE_LEN);
-
-    /* Encrypt */
-    uint8_t ciphertext[9 + 16];
-    build_disco_box(s_disco_priv, peer_disco_pub,
-                    payload, sizeof(payload),
-                    ciphertext, nonce);
-
-    /* Assemble packet: magic + nonce + ciphertext */
-    uint8_t pkt[DISCO_MAGIC_LEN + DISCO_NONCE_LEN + sizeof(ciphertext)];
-    memcpy(pkt,                          DISCO_MAGIC, DISCO_MAGIC_LEN);
-    memcpy(pkt + DISCO_MAGIC_LEN,        nonce,       DISCO_NONCE_LEN);
-    memcpy(pkt + DISCO_MAGIC_LEN + DISCO_NONCE_LEN, ciphertext, sizeof(ciphertext));
-
-    /* Send to peer endpoint */
-    struct sockaddr_in dst = {
-        .sin_family      = AF_INET,
-        .sin_addr.s_addr = ip_2_ip4(endpoint)->addr,
-        .sin_port        = htons(port),
-    };
-    sendto(s_sock, pkt, sizeof(pkt), 0,
-           (struct sockaddr *)&dst, sizeof(dst));
-
-    /* Register in pending table */
-    disco_peer_ctx_t *p = &s_pending[s_pending_count++];
-    p->peer_index = peer_index;
+    /* Register pending so the Pong handler can route the endpoint update
+     * to the right wg peer. */
+    pending_ping_t *p = pending_alloc();
+    p->in_use = true;
+    memcpy(p->tx_id,          tx_id_field,    DISCO_TXID_LEN);
     memcpy(p->peer_disco_pub, peer_disco_pub, 32);
-    p->endpoint = *endpoint;
-    p->port     = port;
-    memcpy(p->tx_id, tx_id, 8);
+    p->wg_peer_index = wg_peer_index;
 
-    ESP_LOGD(TAG, "DISCO Ping sent to peer %d", peer_index);
+    ESP_LOGI(TAG, "Ping sent peer=%u to %u.%u.%u.%u:%u txid=%02x%02x%02x%02x...",
+             wg_peer_index,
+             (unsigned)((ip_2_ip4(cand_ip)->addr      ) & 0xFF),
+             (unsigned)((ip_2_ip4(cand_ip)->addr >>  8) & 0xFF),
+             (unsigned)((ip_2_ip4(cand_ip)->addr >> 16) & 0xFF),
+             (unsigned)((ip_2_ip4(cand_ip)->addr >> 24) & 0xFF),
+             (unsigned)cand_port,
+             tx_id_field[0], tx_id_field[1], tx_id_field[2], tx_id_field[3]);
     return ESP_OK;
 }
 
-void ts_disco_stop(void)
+/* ------------------------------------------------------------------ */
+/* Receive path                                                         */
+/* ------------------------------------------------------------------ */
+
+/* Build and send a Pong in response to a received Ping. */
+static void send_pong(const uint8_t sender_pub[32],
+                      const uint8_t tx_id[DISCO_TXID_LEN],
+                      const ip_addr_t *src_ip, uint16_t src_port)
 {
-    s_running = false;
-    if (s_sock >= 0) {
-        close(s_sock);
-        s_sock = -1;
+    uint8_t inner[DISCO_INNER_HDR_LEN + DISCO_PONG_BODY_LEN];
+    inner[0] = DISCO_MSG_PONG;
+    inner[1] = 0;
+    uint8_t *body = inner + DISCO_INNER_HDR_LEN;
+    memcpy(body, tx_id, DISCO_TXID_LEN);
+    /* SrcIP[16]: IPv4-mapped IPv6 = ::ffff:a.b.c.d */
+    uint8_t *srcip16 = body + DISCO_TXID_LEN;
+    memset(srcip16, 0, 10);
+    srcip16[10] = 0xFF;
+    srcip16[11] = 0xFF;
+    uint32_t addr = ip_2_ip4(src_ip)->addr;     /* network byte order */
+    memcpy(srcip16 + 12, &addr, 4);
+    /* SrcPort[2] big-endian */
+    body[DISCO_TXID_LEN + 16 + 0] = (uint8_t)(src_port >> 8);
+    body[DISCO_TXID_LEN + 16 + 1] = (uint8_t)(src_port & 0xFF);
+
+    uint8_t frame[DISCO_HEADER_LEN + DISCO_TAG_LEN +
+                  DISCO_INNER_HDR_LEN + DISCO_PONG_BODY_LEN];
+    size_t  frame_len = 0;
+    if (build_disco_frame(sender_pub, inner, sizeof(inner),
+                          frame, sizeof(frame), &frame_len) != ESP_OK) {
+        return;
     }
-    vTaskDelay(pdMS_TO_TICKS(100));
+
+    err_t lwerr = wireguard_esp32_udp_send(src_ip, src_port, frame, frame_len);
+    if (lwerr != ERR_OK) {
+        ESP_LOGW(TAG, "Pong udp_send -> %d", (int)lwerr);
+        return;
+    }
+    ESP_LOGI(TAG, "Pong sent to %u.%u.%u.%u:%u",
+             (unsigned)((addr      ) & 0xFF),
+             (unsigned)((addr >>  8) & 0xFF),
+             (unsigned)((addr >> 16) & 0xFF),
+             (unsigned)((addr >> 24) & 0xFF),
+             (unsigned)src_port);
+}
+
+static void ts_disco_rx(const uint8_t *data, size_t len,
+                        const ip_addr_t *src_ip, uint16_t src_port)
+{
+    if (!s_inited) return;
+    if (len < DISCO_HEADER_LEN + DISCO_TAG_LEN + DISCO_INNER_HDR_LEN) return;
+    if (memcmp(data, DISCO_MAGIC, DISCO_MAGIC_LEN) != 0) return;
+
+    const uint8_t *sender_pub = data + DISCO_MAGIC_LEN;
+
+    /* Decrypt inner plaintext. */
+    uint8_t pt[256];
+    int pt_len = open_disco_frame(data, len, sender_pub, pt, sizeof(pt));
+    if (pt_len < 0) {
+        ESP_LOGD(TAG, "drop: box open failed (sender %02x%02x%02x%02x...)",
+                 sender_pub[0], sender_pub[1], sender_pub[2], sender_pub[3]);
+        return;
+    }
+    if (pt_len < DISCO_INNER_HDR_LEN) return;
+
+    uint8_t type = pt[0];
+    /* pt[1] = version, ignore */
+
+    switch (type) {
+    case DISCO_MSG_PING: {
+        if (pt_len < DISCO_INNER_HDR_LEN + DISCO_TXID_LEN) return;
+        const uint8_t *tx_id = pt + DISCO_INNER_HDR_LEN;
+        ESP_LOGI(TAG, "Ping recv from %08x:%u txid=%02x%02x%02x%02x...",
+                 (unsigned)ip_2_ip4(src_ip)->addr, (unsigned)src_port,
+                 tx_id[0], tx_id[1], tx_id[2], tx_id[3]);
+        send_pong(sender_pub, tx_id, src_ip, src_port);
+        break;
+    }
+    case DISCO_MSG_PONG: {
+        if (pt_len < DISCO_INNER_HDR_LEN + DISCO_TXID_LEN) return;
+        const uint8_t *tx_id = pt + DISCO_INNER_HDR_LEN;
+        pending_ping_t *pp = pending_find(tx_id);
+        if (!pp) {
+            ESP_LOGD(TAG, "Pong with unknown txid %02x%02x%02x%02x...",
+                     tx_id[0], tx_id[1], tx_id[2], tx_id[3]);
+            return;
+        }
+        /* Verify the responder is who we pinged. */
+        if (memcmp(pp->peer_disco_pub, sender_pub, 32) != 0) {
+            ESP_LOGW(TAG, "Pong txid match but disco_pub mismatch (drop)");
+            return;
+        }
+        pp->in_use = false;
+        ESP_LOGI(TAG, "Pong recv from %u.%u.%u.%u:%u → peer %u direct",
+                 (unsigned)((ip_2_ip4(src_ip)->addr      ) & 0xFF),
+                 (unsigned)((ip_2_ip4(src_ip)->addr >>  8) & 0xFF),
+                 (unsigned)((ip_2_ip4(src_ip)->addr >> 16) & 0xFF),
+                 (unsigned)((ip_2_ip4(src_ip)->addr >> 24) & 0xFF),
+                 (unsigned)src_port, pp->wg_peer_index);
+        wireguard_esp32_update_endpoint(pp->wg_peer_index, src_ip, src_port);
+        break;
+    }
+    default:
+        ESP_LOGD(TAG, "drop: unsupported DISCO type 0x%02x", type);
+        break;
+    }
 }

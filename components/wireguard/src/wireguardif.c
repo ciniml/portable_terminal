@@ -79,6 +79,47 @@ void wireguard_esp32_set_derp_output(wireguard_derp_output_fn fn)
     s_derp_output_fn = fn;
 }
 
+/* DISCO input callback (set by Tailscale component). Receives any UDP
+ * packet whose first 6 bytes match the Tailscale "TS💬" magic. */
+static wireguard_disco_input_fn s_disco_input_fn = NULL;
+
+void wireguard_esp32_set_disco_input(wireguard_disco_input_fn fn)
+{
+    s_disco_input_fn = fn;
+}
+
+/* Tailscale DISCO magic — "TS" (0x54 0x53) + UTF-8 U+1F4AC "💬"
+ * (0xF0 0x9F 0x92 0xAC). See tailscale.com/disco package doc. */
+static const uint8_t kDiscoMagic[6] = { 0x54, 0x53, 0xF0, 0x9F, 0x92, 0xAC };
+/* The smallest valid DISCO frame is magic(6) + senderDiscoPub(32) +
+ * nonce(24) + tag(16) + at least 2 bytes (type + version) of plaintext.
+ * Anything shorter can't be DISCO. */
+#define DISCO_MIN_LEN  (6 + 32 + 24 + 16 + 2)
+
+/* Reference to the running WG device (managed mode keeps only one).
+ * Used by wireguard_esp32_udp_send() so DISCO can share the WG socket. */
+static struct wireguard_device *s_wg_device_for_udp = NULL;
+
+err_t wireguard_esp32_udp_send(const ip_addr_t *dst, uint16_t dst_port,
+                                const uint8_t *data, size_t len)
+{
+	if (!s_wg_device_for_udp || !s_wg_device_for_udp->udp_pcb) {
+		return ERR_USE;
+	}
+	if (!dst || !data || len == 0) return ERR_ARG;
+
+	struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
+	if (!p) return ERR_MEM;
+	memcpy(p->payload, data, len);
+
+	err_t e = s_wg_device_for_udp->underlying_netif
+		? udp_sendto_if(s_wg_device_for_udp->udp_pcb, p, dst, dst_port,
+		                s_wg_device_for_udp->underlying_netif)
+		: udp_sendto(s_wg_device_for_udp->udp_pcb, p, dst, dst_port);
+	pbuf_free(p);
+	return e;
+}
+
 /* DERP pseudo-address range: 127.3.3.0/24 (host-order) */
 #define DERP_PSEUDO_NET  0x7F030300u
 #define DERP_PSEUDO_MASK 0xFFFFFF00u
@@ -640,6 +681,20 @@ void wireguardif_network_rx(void *arg, struct udp_pcb *pcb, struct pbuf *p, cons
 	struct message_cookie_reply *msg_cookie;
 	struct message_transport_data *msg_data;
 
+	/* Tailscale DISCO dispatch. DISCO Ping/Pong frames share the WG
+	 * udp_pcb so that the source port the peer sees (= our listen
+	 * port, default 41641) matches the WG endpoint they should route
+	 * back to. The same path is taken by DERP-relayed packets
+	 * (inject_wg_packet() calls us directly), so an inbound DISCO
+	 * ping over either UDP or DERP lands here. */
+	if (len >= DISCO_MIN_LEN && memcmp(data, kDiscoMagic, 6) == 0) {
+		if (s_disco_input_fn) {
+			s_disco_input_fn(data, len, addr, port);
+		}
+		pbuf_free(p);
+		return;
+	}
+
 	uint8_t type = wireguard_get_message_type(data, len);
 	ESP_LOGV(TAG, "network_rx: %08x:%d", addr->u_addr.ip4.addr, port);
 
@@ -1082,6 +1137,13 @@ err_t wireguardif_init(struct netif *netif) {
 							netif->flags = 0;
 
 							udp_recv(udp, wireguardif_network_rx, device);
+
+							/* Publish the device so wireguard_esp32_udp_send()
+							 * can borrow the WG udp_pcb for DISCO probe packets
+							 * (sharing src port with WG is the whole point of
+							 * doing DISCO at all). Managed mode only ever runs
+							 * a single device. */
+							s_wg_device_for_udp = device;
 
 							// Start a periodic timer for this wireguard device
 							sys_timeout(WIREGUARDIF_TIMER_MSECS, wireguardif_tmr, device);

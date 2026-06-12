@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "lwip/ip_addr.h"
+#include "lwip/netif.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -383,15 +384,69 @@ static bool peer_key_handler(ts_js_t *j, void *ctx)
     }
     if (ts_js_str_eq(j, "Endpoints")) {
         if (ts_js_next(j) != TS_JS_ARR_START) return true;
-        ts_js_evt_t e = ts_js_next(j);
-        if (e == TS_JS_STRING && !p->have_direct_ep) {
+        // Walk every advertised endpoint. Score each candidate to pick
+        // the most likely reachable one from this device:
+        //   +30 same /24 as our Wi-Fi STA IP   (very likely directly reachable)
+        //   +20 same /16
+        //   +10 same /8
+        //   +5  RFC1918 / link-local         (could be reachable; LAN-ish)
+        //   +1  CGNAT 100.64.0.0/10
+        //    0  public                        (would need NAT hairpin we don't do)
+        // Higher score wins. Score 0 candidates are still recorded so
+        // we have a worst-case fallback over DERP-less mode.
+        //
+        // The /24/16/8 boost is the key — without it we'd happily pick
+        // a peer's docker-bridge 172.17.0.1 over a real LAN endpoint.
+        uint32_t self_ip_h = 0;
+        for (struct netif *nif = netif_list; nif; nif = nif->next) {
+            if (nif->name[0] == 'w' && nif->name[1] == 'g') continue;
+            if (!ip4_addr_isany_val(*netif_ip4_addr(nif))) {
+                self_ip_h = ntohl(netif_ip4_addr(nif)->addr);
+                break;
+            }
+        }
+        int  picked_score = -1;
+        char picked_ep[64] = {0};
+        ts_js_evt_t e;
+        while ((e = ts_js_next(j)) != TS_JS_ARR_END &&
+               e != TS_JS_END && e != TS_JS_ERROR) {
+            if (e != TS_JS_STRING) continue;
             char ep[64];
             ts_js_str_copy(j, ep, sizeof(ep));
-            if (parse_endpoint(ep, &p->ep_ip, &p->ep_port))
+            ip_addr_t  tmp_ip;
+            uint16_t   tmp_port;
+            if (!parse_endpoint(ep, &tmp_ip, &tmp_port)) {
+                ESP_LOGI(TAG, "  endpoint candidate (unparseable) %s", ep);
+                continue;
+            }
+            const ip4_addr_t *ip4 = ip_2_ip4(&tmp_ip);
+            if (!ip4) continue;
+            uint32_t a = ntohl(ip4->addr);
+            int score = 0;
+            const bool is_rfc1918 =
+                (a & 0xFF000000) == 0x0A000000 ||
+                (a & 0xFFF00000) == 0xAC100000 ||
+                (a & 0xFFFF0000) == 0xC0A80000 ||
+                (a & 0xFFFF0000) == 0xA9FE0000;
+            if (is_rfc1918)                       score += 5;
+            else if ((a & 0xFFC00000) == 0x64400000) score += 1;  /* CGNAT */
+            if (self_ip_h) {
+                if ((a & 0xFFFFFF00) == (self_ip_h & 0xFFFFFF00)) score += 30;
+                else if ((a & 0xFFFF0000) == (self_ip_h & 0xFFFF0000)) score += 20;
+                else if ((a & 0xFF000000) == (self_ip_h & 0xFF000000)) score += 10;
+            }
+            ESP_LOGI(TAG, "  endpoint candidate s%d %s", score, ep);
+            if (score > picked_score) {
+                picked_score      = score;
+                strlcpy(picked_ep, ep, sizeof(picked_ep));
+                p->ep_ip          = tmp_ip;
+                p->ep_port        = tmp_port;
                 p->have_direct_ep = true;
+            }
         }
-        while ((e = ts_js_next(j)) != TS_JS_ARR_END &&
-               e != TS_JS_END && e != TS_JS_ERROR) {}
+        if (p->have_direct_ep) {
+            ESP_LOGI(TAG, "  endpoint PICKED s%d %s", picked_score, picked_ep);
+        }
         return true;
     }
     if (ts_js_str_eq(j, "DERP")) {
@@ -505,7 +560,8 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
         for (int b = 0; b < 32; b++)
             if (p->disco_pub[b]) { disco_set = true; break; }
         if (disco_set) {
-            ts_disco_ping(wg_idx, p->disco_pub, &ep_ip, ep_port);
+            ts_disco_send_ping(wg_idx, p->node_pub, p->disco_pub,
+                               &ep_ip, ep_port);
         }
     }
 }

@@ -182,10 +182,12 @@ esp_err_t tailscale_esp32_start(const tailscale_config_t *config)
     /* 4. Register DERP output hook so WireGuard can route packets via DERP */
     wireguard_esp32_set_derp_output(ts_derp_send_packet);
 
-    /* 5. Start DISCO */
-    err = ts_disco_start(s_keys.disco_priv, s_keys.disco_pub);
+    /* 5. Initialise DISCO. Registers a callback with wireguardif so any
+     *    DISCO frame arriving on the WG UDP port (or via DERP injection)
+     *    is dispatched to ts_disco_rx. No own socket, no own task. */
+    err = ts_disco_init(s_keys.disco_priv, s_keys.disco_pub, s_keys.node_pub);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "DISCO start failed (non-fatal): %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "DISCO init failed (non-fatal): %s", esp_err_to_name(err));
     }
 
     /* 5. Set up control context */
@@ -210,7 +212,9 @@ esp_err_t tailscale_esp32_stop(void)
 
     ts_ctrl_stop(&s_ctrl_ctx);
     ts_derp_disconnect();
-    ts_disco_stop();
+    /* DISCO has no task/socket of its own; unregister the dispatcher so
+     * a future tailscale_esp32_start() can re-init safely. */
+    wireguard_esp32_set_disco_input(NULL);
     wireguard_esp32_stop();
 
     if (s_ctrl_task) {

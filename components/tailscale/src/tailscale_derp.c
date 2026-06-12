@@ -5,11 +5,11 @@
 
 #include "tailscale_derp.h"
 #include "tailscale_keys.h"
+#include "tailscale_nacl.h"      /* shared XSalsa20-Poly1305 box (with DISCO) */
 
 #include "wireguard_esp32.h"     /* for wireguardif input — see note below */
 #include "wireguardif.h"
 #include "crypto.h"              /* wireguard_x25519, etc. */
-#include "crypto/refc/poly1305-donna.h"
 
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
@@ -117,142 +117,18 @@ static int derp_tls_read(derp_conn_t *c, uint8_t *buf, size_t len)
 }
 
 /* ------------------------------------------------------------------ */
-/* HSalsa20 + Salsa20 (for NaCl box used in DERP ClientInfo)           */
+/* DERP ClientInfo wire layout: nonce(24) || tag(16) || ct(plen).      */
+/* The actual NaCl box (XSalsa20-Poly1305) lives in tailscale_nacl.c   */
+/* — that helper produces tag(16)||ct, and we just prepend the nonce. */
 /* ------------------------------------------------------------------ */
-
-#define ROTL32(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
-#define LD32(p) ( (uint32_t)(p)[0]        | ((uint32_t)(p)[1] <<  8) \
-                | ((uint32_t)(p)[2] << 16) | ((uint32_t)(p)[3] << 24))
-#define ST32(p, v) do { (p)[0]=(v)&0xff; (p)[1]=((v)>>8)&0xff; \
-                        (p)[2]=((v)>>16)&0xff; (p)[3]=((v)>>24)&0xff; } while(0)
-
-/* Salsa20 double-round (applied 10× for Salsa20/20) */
-#define SALSA_QR(a,b,c,d) \
-    b ^= ROTL32(a+d, 7);  c ^= ROTL32(b+a, 9); \
-    d ^= ROTL32(c+b,13);  a ^= ROTL32(d+c,18);
-
-static void salsa20_core(uint32_t out[16], const uint32_t in[16])
-{
-    uint32_t x[16];
-    memcpy(x, in, 64);
-    for (int i = 0; i < 10; i++) {
-        SALSA_QR(x[ 0], x[ 4], x[ 8], x[12]);
-        SALSA_QR(x[ 5], x[ 9], x[13], x[ 1]);
-        SALSA_QR(x[10], x[14], x[ 2], x[ 6]);
-        SALSA_QR(x[15], x[ 3], x[ 7], x[11]);
-        SALSA_QR(x[ 0], x[ 1], x[ 2], x[ 3]);
-        SALSA_QR(x[ 5], x[ 6], x[ 7], x[ 4]);
-        SALSA_QR(x[10], x[11], x[ 8], x[ 9]);
-        SALSA_QR(x[15], x[12], x[13], x[14]);
-    }
-    for (int i = 0; i < 16; i++) out[i] = x[i] + in[i];
-}
-
-/* HSalsa20: key(32) + nonce_prefix(16) → subkey(32). No addition of input. */
-static void hsalsa20(const uint8_t key[32], const uint8_t n[16], uint8_t out[32])
-{
-    uint32_t x[16] = {
-        0x61707865, LD32(key+ 0), LD32(key+ 4), LD32(key+ 8),
-        LD32(key+12), 0x3320646e, LD32(n+ 0), LD32(n+ 4),
-        LD32(n+ 8), LD32(n+12), 0x79622d32, LD32(key+16),
-        LD32(key+20), LD32(key+24), LD32(key+28), 0x6b206574,
-    };
-    uint32_t z[16];
-    memcpy(z, x, 64);
-    for (int i = 0; i < 10; i++) {
-        SALSA_QR(z[ 0], z[ 4], z[ 8], z[12]);
-        SALSA_QR(z[ 5], z[ 9], z[13], z[ 1]);
-        SALSA_QR(z[10], z[14], z[ 2], z[ 6]);
-        SALSA_QR(z[15], z[ 3], z[ 7], z[11]);
-        SALSA_QR(z[ 0], z[ 1], z[ 2], z[ 3]);
-        SALSA_QR(z[ 5], z[ 6], z[ 7], z[ 4]);
-        SALSA_QR(z[10], z[11], z[ 8], z[ 9]);
-        SALSA_QR(z[15], z[12], z[13], z[14]);
-    }
-    ST32(out+ 0, z[ 0]); ST32(out+ 4, z[ 5]);
-    ST32(out+ 8, z[10]); ST32(out+12, z[15]);
-    ST32(out+16, z[ 6]); ST32(out+20, z[ 7]);
-    ST32(out+24, z[ 8]); ST32(out+28, z[ 9]);
-}
-
-/*
- * NaCl secretbox_seal: XSalsa20-Poly1305.
- * key=32, nonce=24, plaintext, out = nonce(24) + poly1305_tag(16) + ciphertext.
- * out must be at least 24+16+plaintext_len bytes.
- */
-static void nacl_box_seal(const uint8_t shared[32],     /* X25519 shared secret */
+static void nacl_box_seal(const uint8_t shared[32],
                           const uint8_t nonce[24],
                           const uint8_t *pt, size_t ptlen,
                           uint8_t *out)
 {
-    /*
-     * NaCl box key derivation (2 steps):
-     *   1. nacl_key = HSalsa20(k=dh_point, n=[0]*16)
-     *   2. subkey   = HSalsa20(k=nacl_key, n=nonce[0:16])
-     */
-    static const uint8_t zero16[16] = {0};
-    uint8_t nacl_key[32];
-    hsalsa20(shared, zero16, nacl_key);
-    uint8_t subkey[32];
-    hsalsa20(nacl_key, nonce, subkey);
-
-    /*
-     * XSalsa20 keystream layout (block 0 = bytes 0-63):
-     *   bytes  0-31: Poly1305 key
-     *   bytes 32-63: encrypt plaintext[0:32]
-     *   block 1 (bytes 64-127): encrypt plaintext[32:96]
-     *   etc.
-     * We must use the SECOND half of block 0 for the first 32 bytes of plaintext,
-     * NOT skip to block 1.
-     */
-    uint32_t state[16] = {
-        0x61707865, LD32(subkey+ 0), LD32(subkey+ 4), LD32(subkey+ 8),
-        LD32(subkey+12), 0x3320646e, LD32(nonce+16), LD32(nonce+20),
-        0, 0,  /* counter (64-bit LE) */
-        0x79622d32, LD32(subkey+16), LD32(subkey+20), LD32(subkey+24),
-        LD32(subkey+28), 0x6b206574,
-    };
-
-    /* Block 0: bytes 0-31 = Poly1305 key, bytes 32-63 = encrypt pt[0:32] */
-    uint32_t blk[16];
-    salsa20_core(blk, state);
-    uint8_t blk0[64];
-    for (int i = 0; i < 16; i++) ST32(blk0 + i*4, blk[i]);
-
-    uint8_t poly_key[32];
-    memcpy(poly_key, blk0, 32);
-
-    uint8_t *ct = out + 40; /* nonce(24) + tag(16) */
-    size_t pos = 0;
-
-    /* Use bytes 32-63 of block 0 for plaintext[0:min(32,ptlen)] */
-    size_t first = ptlen < 32 ? ptlen : 32;
-    for (size_t j = 0; j < first; j++) ct[j] = pt[j] ^ blk0[32 + j];
-    pos = first;
-
-    /* Use blocks 1, 2, ... for remaining plaintext */
-    state[8] = 1;
-    while (pos < ptlen) {
-        salsa20_core(blk, state);
-        state[8]++;
-        uint8_t ks[64];
-        for (int i = 0; i < 16; i++) ST32(ks + i*4, blk[i]);
-        size_t chunk = ptlen - pos < 64 ? ptlen - pos : 64;
-        for (size_t j = 0; j < chunk; j++) ct[pos + j] = pt[pos + j] ^ ks[j];
-        pos += chunk;
-    }
-
-    /* Compute Poly1305 MAC over ciphertext */
-    poly1305_context pctx;
-    poly1305_init(&pctx, poly_key);
-    poly1305_update(&pctx, ct, ptlen);
-    uint8_t tag[16];
-    poly1305_finish(&pctx, tag);
-
-    /* Write output: nonce(24) | tag(16) | ciphertext */
-    memcpy(out,      nonce, 24);
-    memcpy(out + 24, tag,   16);
-    /* ciphertext already written at out+40 */
+    memcpy(out, nonce, 24);
+    ts_nacl_box_seal(shared, nonce, pt, ptlen, out + 24);
+    /* out layout now = nonce(24) || tag(16) || ct(ptlen) */
 }
 
 /* ------------------------------------------------------------------ */

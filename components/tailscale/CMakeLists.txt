@@ -9,6 +9,7 @@ if(CONFIG_TAILSCALE_ENABLE)
             "src/tailscale_derp.c"
             "src/tailscale_disco.c"
             "src/tailscale_jstream.c"
+            "src/tailscale_nacl.c"
         INCLUDE_DIRS
             "include"
         PRIV_INCLUDE_DIRS
