@@ -436,19 +436,71 @@ extern "C" void app_main(void) {
     // picks the selected one and dials.
     tab5::profiles.init();
 
+    // End-to-end render benchmark hook: watch the RX byte stream for
+    // literal "BENCH_START\n" and "BENCH_END\n" markers and timestamp
+    // them *after* terminal.render_dirty() returns. Users wrap a test
+    // command with `echo BENCH_START; cmd; echo BENCH_END` and read
+    // the resulting "bench took NNN ms" line from the monitor — that
+    // measures the full chain (host stdout → SSH → libssh2 → terminal
+    // feed → LCD render), not just host-side execution time.
+    //
+    // Simple position-based matcher. Both markers have no internal
+    // repeating prefix, so on mismatch we only need to retry the byte
+    // against the marker's first char.
+    struct PerfMarker {
+        const char* tag;
+        const size_t len;
+        size_t pos;
+    };
+    // No trailing newline — see comment in ssh_connection.cpp (SSH PTY
+    // converts \n to \r\n, so a "...\n" match never fires).
+    static PerfMarker mk_start = { "BENCH_START", 11, 0 };
+    static PerfMarker mk_end   = { "BENCH_END",    9, 0 };
+    static int64_t bench_start_us = 0;
+    auto perf_feed_one = [](PerfMarker& m, uint8_t b) -> bool {
+        if (b == static_cast<uint8_t>(m.tag[m.pos])) {
+            m.pos++;
+            if (m.pos == m.len) { m.pos = 0; return true; }
+        } else {
+            m.pos = (b == static_cast<uint8_t>(m.tag[0])) ? 1 : 0;
+        }
+        return false;
+    };
+
     // RX path the connection writes incoming bytes through (held by the
     // I/O task and by the reconnect supervisor). Captures terminal /
     // cursor by reference; they're statics in app_main.
-    auto remote_rx = [](std::span<const uint8_t> bytes) {
-        Lock lk;
-        if (tab5::ui_root::overlay_active()) {
-            (void)terminal.feed(bytes);
-            return;
+    auto remote_rx = [perf_feed_one](std::span<const uint8_t> bytes) {
+        {
+            Lock lk;
+            if (tab5::ui_root::overlay_active()) {
+                (void)terminal.feed(bytes);
+            } else {
+                cursor.erase();
+                (void)terminal.feed(bytes);
+                (void)terminal.render_dirty();
+                cursor.draw();
+            }
         }
-        cursor.erase();
-        (void)terminal.feed(bytes);
-        (void)terminal.render_dirty();
-        cursor.draw();
+        // Marker scan AFTER the render has settled. The timestamp here
+        // is "this chunk is fully on the LCD".
+        for (uint8_t b : bytes) {
+            if (perf_feed_one(mk_start, b)) {
+                bench_start_us = esp_timer_get_time();
+                ESP_LOGI(kTag, "bench: START at %lld us", (long long)bench_start_us);
+            }
+            if (perf_feed_one(mk_end, b)) {
+                int64_t now = esp_timer_get_time();
+                if (bench_start_us) {
+                    int64_t delta_ms = (now - bench_start_us) / 1000;
+                    ESP_LOGI(kTag, "bench: END at %lld us, took %lld ms",
+                             (long long)now, (long long)delta_ms);
+                } else {
+                    ESP_LOGI(kTag, "bench: END at %lld us (no START seen)",
+                             (long long)now);
+                }
+            }
+        }
     };
     auto get_pty_size = [] {
         Lock lk;

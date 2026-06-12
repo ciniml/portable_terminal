@@ -179,6 +179,45 @@ void ssh_task(void* /*arg*/) {
     uint8_t txbuf[kRxChunk];
     int64_t next_ka_us = esp_timer_get_time();
 
+    // Coarse throughput meter for performance investigation: log a single
+    // "rx=N tx=N B/s" line once a second whenever there was activity.
+    // Cheap (two adds per chunk + one esp_timer_get_time() per iteration)
+    // and only spams when bytes are actually flowing.
+    uint32_t rx_acc        = 0;
+    uint32_t tx_acc        = 0;
+    int64_t  perf_window_us = esp_timer_get_time();
+
+    // Pure-comm bench markers: scan the libssh2 RX bytes right after they
+    // arrive, BEFORE handing off to rx_apply (which renders to the LCD).
+    // Same BENCH_START / BENCH_END markers app_main watches post-render —
+    // user wraps a command with `echo BENCH_START; cmd; echo BENCH_END`
+    // and gets BOTH numbers from one test:
+    //   ssh: bench: COMM took N ms        ← pure SSH/lwIP/libssh2 path
+    //   tab5_term: bench: took M ms       ← includes terminal+LCD render
+    // (M - N) ≈ rendering cost.
+    // Markers exclude the trailing newline on purpose: SSH PTY translates
+    // \n to \r\n on the way to the client, and a strict "...\n" match
+    // never fires. The substring is unique enough not to collide with
+    // normal terminal output.
+    struct CommMarker { const char* tag; size_t len; size_t pos; };
+    CommMarker mk_start = { "BENCH_START", 11, 0 };
+    CommMarker mk_end   = { "BENCH_END",    9, 0 };
+    int64_t comm_start_us = 0;
+    // True between BENCH_START and BENCH_END markers: skip rx_apply so
+    // terminal.feed / render_dirty don't block the read loop and pollute
+    // the "pure-comm" timing with render time. LCD goes dark for the
+    // duration; trade-off is acceptable for a measurement tool.
+    bool    bench_no_render = false;
+    auto scan_marker = [](CommMarker& m, uint8_t b) -> bool {
+        if (b == static_cast<uint8_t>(m.tag[m.pos])) {
+            m.pos++;
+            if (m.pos == m.len) { m.pos = 0; return true; }
+        } else {
+            m.pos = (b == static_cast<uint8_t>(m.tag[0])) ? 1 : 0;
+        }
+        return false;
+    };
+
     while (g_sess.running) {
         // libssh2 doesn't fire keepalives on its own — poke it once a
         // second and let it decide when to actually send a packet.
@@ -210,7 +249,34 @@ void ssh_task(void* /*arg*/) {
                                              reinterpret_cast<char*>(rxbuf),
                                              sizeof(rxbuf));
             if (n > 0) {
-                if (g_sess.rx_apply) {
+                rx_acc += static_cast<uint32_t>(n);
+                // Pure-comm bench scan: timestamp at libssh2 RX, *before*
+                // rx_apply (which renders to the LCD and would inflate
+                // the number with terminal/draw cost).
+                for (size_t i = 0; i < (size_t)n; ++i) {
+                    uint8_t b = rxbuf[i];
+                    if (scan_marker(mk_start, b)) {
+                        comm_start_us = esp_timer_get_time();
+                        bench_no_render = true;
+                        ESP_LOGI(kTag, "bench: COMM_START at %lld us (render off)",
+                                 (long long)comm_start_us);
+                    }
+                    if (scan_marker(mk_end, b)) {
+                        int64_t now = esp_timer_get_time();
+                        bench_no_render = false;
+                        if (comm_start_us) {
+                            int64_t delta_ms = (now - comm_start_us) / 1000;
+                            ESP_LOGI(kTag,
+                                     "bench: COMM_END at %lld us, comm took %lld ms (render off)",
+                                     (long long)now, (long long)delta_ms);
+                        } else {
+                            ESP_LOGI(kTag,
+                                     "bench: COMM_END at %lld us (no START seen)",
+                                     (long long)now);
+                        }
+                    }
+                }
+                if (g_sess.rx_apply && !bench_no_render) {
                     g_sess.rx_apply(std::span<const uint8_t>(rxbuf,
                                                              static_cast<size_t>(n)));
                 }
@@ -246,8 +312,25 @@ void ssh_task(void* /*arg*/) {
                 g_sess.running = false;
                 break;
             }
+            tx_acc += static_cast<uint32_t>(w);
             got -= static_cast<size_t>(w);
             off += static_cast<size_t>(w);
+        }
+
+        // Once-a-second throughput report. Silent when both sides idle.
+        int64_t loop_now = esp_timer_get_time();
+        int64_t window_us = loop_now - perf_window_us;
+        if (window_us >= 1000000) {
+            if (rx_acc || tx_acc) {
+                uint32_t rx_bps = (uint32_t)((uint64_t)rx_acc * 1000000ULL / window_us);
+                uint32_t tx_bps = (uint32_t)((uint64_t)tx_acc * 1000000ULL / window_us);
+                ESP_LOGI(kTag, "perf rx=%u B/s tx=%u B/s (win=%lld ms)",
+                         (unsigned)rx_bps, (unsigned)tx_bps,
+                         (long long)(window_us / 1000));
+            }
+            rx_acc = 0;
+            tx_acc = 0;
+            perf_window_us = loop_now;
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
