@@ -334,6 +334,24 @@ static void parse_derpmap_stream(ts_js_t *j)
 /* Peer array — full snapshot ("Peers") or incremental ("PeersChanged") */
 /* ------------------------------------------------------------------ */
 
+/* Top-N direct-UDP candidates we'll DISCO-probe for each peer. Sized
+ * for the typical Tailscale advertise (LAN + Docker-bridge IPs + WAN);
+ * 4 is enough to cover one LAN candidate + one or two CGNAT/RFC1918
+ * + one public, which is what mobile-network / external-LAN cases need
+ * to find any reachable path. */
+/* Big enough to retain a peer's typical advertisement: one same-LAN
+ * RFC1918 + a couple of Docker-bridge RFC1918 + a CGNAT + a public WAN
+ * (the last one is the only thing that works from external networks
+ * like phone tethering and is the lowest-scored — without keeping it
+ * around we'd silently drop the only reachable path). */
+#define TS_NETMAP_MAX_CANDIDATES 8
+
+typedef struct {
+    ip_addr_t ip;
+    uint16_t  port;
+    int       score;     /* same encoding as `score` below in the parser */
+} ep_candidate_t;
+
 typedef struct {
     int64_t  node_id;
     bool     have_node_pub;
@@ -341,9 +359,15 @@ typedef struct {
     uint8_t  disco_pub[32];
     char     ts_ip[20];
     char     name[64];
+    /* Best single direct endpoint (kept for backward compatibility with
+     * the existing WG add/update path that takes one address). */
     ip_addr_t ep_ip;
     uint16_t  ep_port;
     bool      have_direct_ep;
+    /* Top-N candidates sorted by descending score for multi-probe DISCO.
+     * Populated together with ep_ip / ep_port. */
+    ep_candidate_t cands[TS_NETMAP_MAX_CANDIDATES];
+    int       cand_count;
     int       derp_region;     /* >0 when a DERP pseudo endpoint was advertised */
 } peer_parse_t;
 
@@ -384,19 +408,23 @@ static bool peer_key_handler(ts_js_t *j, void *ctx)
     }
     if (ts_js_str_eq(j, "Endpoints")) {
         if (ts_js_next(j) != TS_JS_ARR_START) return true;
-        // Walk every advertised endpoint. Score each candidate to pick
-        // the most likely reachable one from this device:
+        // Score each candidate; keep the top N (descending) for multi-
+        // probe DISCO. Without multi-probe, a peer on an external
+        // network would have to guess the single right endpoint from
+        // the peer's full enumeration (LAN IPs, Docker bridges, CGNAT,
+        // VPN tunnels, public WAN), which is unreliable. Probing the
+        // top few in parallel via cheap DISCO Pings lets the first
+        // Pong-back win.
+        //
+        // Scoring:
         //   +30 same /24 as our Wi-Fi STA IP   (very likely directly reachable)
         //   +20 same /16
         //   +10 same /8
-        //   +5  RFC1918 / link-local         (could be reachable; LAN-ish)
+        //   +5  RFC1918 / link-local           (LAN-ish, could be reachable)
         //   +1  CGNAT 100.64.0.0/10
-        //    0  public                        (would need NAT hairpin we don't do)
-        // Higher score wins. Score 0 candidates are still recorded so
-        // we have a worst-case fallback over DERP-less mode.
-        //
-        // The /24/16/8 boost is the key — without it we'd happily pick
-        // a peer's docker-bridge 172.17.0.1 over a real LAN endpoint.
+        //   +1  anything else (public WAN, etc — needs router port-forward
+        //       or hairpin but is the only choice from external networks
+        //       like phone tethering)
         uint32_t self_ip_h = 0;
         for (struct netif *nif = netif_list; nif; nif = nif->next) {
             if (nif->name[0] == 'w' && nif->name[1] == 'g') continue;
@@ -405,8 +433,6 @@ static bool peer_key_handler(ts_js_t *j, void *ctx)
                 break;
             }
         }
-        int  picked_score = -1;
-        char picked_ep[64] = {0};
         ts_js_evt_t e;
         while ((e = ts_js_next(j)) != TS_JS_ARR_END &&
                e != TS_JS_END && e != TS_JS_ERROR) {
@@ -422,30 +448,45 @@ static bool peer_key_handler(ts_js_t *j, void *ctx)
             const ip4_addr_t *ip4 = ip_2_ip4(&tmp_ip);
             if (!ip4) continue;
             uint32_t a = ntohl(ip4->addr);
-            int score = 0;
+            int score = 1;   /* base: public WAN still gets probed */
             const bool is_rfc1918 =
                 (a & 0xFF000000) == 0x0A000000 ||
                 (a & 0xFFF00000) == 0xAC100000 ||
                 (a & 0xFFFF0000) == 0xC0A80000 ||
                 (a & 0xFFFF0000) == 0xA9FE0000;
-            if (is_rfc1918)                       score += 5;
-            else if ((a & 0xFFC00000) == 0x64400000) score += 1;  /* CGNAT */
+            if (is_rfc1918)                       score += 4;  /* total 5 */
+            else if ((a & 0xFFC00000) == 0x64400000) score += 0; /* CGNAT, 1 */
             if (self_ip_h) {
                 if ((a & 0xFFFFFF00) == (self_ip_h & 0xFFFFFF00)) score += 30;
                 else if ((a & 0xFFFF0000) == (self_ip_h & 0xFFFF0000)) score += 20;
                 else if ((a & 0xFF000000) == (self_ip_h & 0xFF000000)) score += 10;
             }
             ESP_LOGI(TAG, "  endpoint candidate s%d %s", score, ep);
-            if (score > picked_score) {
-                picked_score      = score;
-                strlcpy(picked_ep, ep, sizeof(picked_ep));
-                p->ep_ip          = tmp_ip;
-                p->ep_port        = tmp_port;
-                p->have_direct_ep = true;
+
+            /* Insertion-sort into cands[] (descending score). Cap at
+             * TS_NETMAP_MAX_CANDIDATES; drop the worst when full. */
+            int slot = p->cand_count;
+            if (slot >= TS_NETMAP_MAX_CANDIDATES) {
+                if (score <= p->cands[TS_NETMAP_MAX_CANDIDATES - 1].score) continue;
+                slot = TS_NETMAP_MAX_CANDIDATES - 1;
+            } else {
+                p->cand_count++;
             }
+            while (slot > 0 && p->cands[slot - 1].score < score) {
+                p->cands[slot] = p->cands[slot - 1];
+                slot--;
+            }
+            p->cands[slot].ip    = tmp_ip;
+            p->cands[slot].port  = tmp_port;
+            p->cands[slot].score = score;
         }
-        if (p->have_direct_ep) {
-            ESP_LOGI(TAG, "  endpoint PICKED s%d %s", picked_score, picked_ep);
+
+        if (p->cand_count > 0) {
+            p->ep_ip          = p->cands[0].ip;
+            p->ep_port        = p->cands[0].port;
+            p->have_direct_ep = true;
+            ESP_LOGI(TAG, "  endpoint TOP%d (best s%d)",
+                     p->cand_count, p->cands[0].score);
         }
         return true;
     }
@@ -479,21 +520,34 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
     bool      have_direct_ep = p->have_direct_ep;
 
 #if CONFIG_TAILSCALE_DERP_ONLY
-    /* DERP-only mode: never use the advertised direct endpoint. The
-     * direct UDP path frequently fails on simplified clients (NAT
-     * hole-punching needs DISCO, hairpin on the same LAN, etc.), and
-     * there is no automatic fallback once an endpoint is fixed. Routing
-     * everything through the home DERP relay is slower but reliable —
-     * the relay reaches the peer by its public key regardless of region. */
+    /* DERP-only mode: never use the advertised direct endpoint. */
+    have_direct_ep = false;
+#else
+    /* Always initialise the WG peer's endpoint to its DERP pseudo
+     * address when a region is known, even if direct candidates are
+     * available. The direct path is then PROMOTED by ts_disco_rx() the
+     * moment a DISCO Pong verifies a reachable candidate (see
+     * wireguard_esp32_update_endpoint() call there). This mirrors
+     * Tailscale magicsock: traffic starts on DERP so connectivity is
+     * never gated on direct UDP succeeding, and switches to direct on
+     * first verified Pong. Without this, a peer whose advertised
+     * direct candidates are all unreachable from our subnet (typical
+     * for phone-tethering / external-network cases) leaves WireGuard
+     * stuck trying to handshake against a dead address — `EHOSTUNREACH`
+     * on the upper-layer connect. */
     have_direct_ep = false;
 #endif
 
-    /* If no direct endpoint, fall back to DERP pseudo-IP 127.3.3.40:<region>. */
+    /* DERP fallback for the WG endpoint. With have_direct_ep forced
+     * false above this is now the only path that sets ep_ip/ep_port,
+     * and it covers both the no-candidate case and the
+     * "wait-for-DISCO-promotion" case. */
     if (!have_direct_ep && p->derp_region > 0) {
         ip4_addr_t derp4;
         ip4addr_aton("127.3.3.40", &derp4);
         ip_addr_copy_from_ip4(ep_ip, derp4);
         ep_port = (uint16_t)p->derp_region;
+        have_direct_ep = true;  /* feed the add/update path below */
     }
 
     char pub_b64[64];
@@ -552,16 +606,23 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
     s_peers[slot].node_id  = p->node_id;
     s_peers[slot].active   = true;
     keep[slot] = true;
-    ESP_LOGI(TAG, "Added peer %s id=%lld (wg_idx=%d, direct=%d)",
-             p->ts_ip, (long long)p->node_id, wg_idx, have_direct_ep);
+    ESP_LOGI(TAG, "Added peer %s id=%lld (wg_idx=%d, cands=%d, derp=%d)",
+             p->ts_ip, (long long)p->node_id, wg_idx,
+             p->cand_count, p->derp_region);
 
-    if (have_direct_ep) {
-        bool disco_set = false;
-        for (int b = 0; b < 32; b++)
-            if (p->disco_pub[b]) { disco_set = true; break; }
-        if (disco_set) {
+    /* DISCO probe — independent of which endpoint WG currently uses.
+     * WG starts on DERP (set above); DISCO promotes to a direct address
+     * via ts_disco_rx() -> wireguard_esp32_update_endpoint() as soon as
+     * any candidate's Pong arrives. ts_disco_rx() ignores subsequent
+     * Pongs for the same peer, so multi-probe races don't toggle the
+     * endpoint back to a slower-but-also-reachable path. */
+    bool disco_set = false;
+    for (int b = 0; b < 32; b++)
+        if (p->disco_pub[b]) { disco_set = true; break; }
+    if (disco_set && p->cand_count > 0) {
+        for (int i = 0; i < p->cand_count; i++) {
             ts_disco_send_ping(wg_idx, p->node_pub, p->disco_pub,
-                               &ep_ip, ep_port);
+                               &p->cands[i].ip, p->cands[i].port);
         }
     }
 }

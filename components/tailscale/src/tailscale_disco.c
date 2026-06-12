@@ -53,7 +53,8 @@ static const uint8_t DISCO_MAGIC[DISCO_MAGIC_LEN] =
 /* State                                                                */
 /* ------------------------------------------------------------------ */
 
-#define DISCO_PENDING_MAX 16
+#define DISCO_PENDING_MAX 64   /* up to TS_NETMAP_MAX_CANDIDATES * peers */
+#define DISCO_VERIFIED_MAX 16  /* one slot per WG peer; idx == wg_peer_index */
 
 typedef struct {
     bool     in_use;
@@ -67,6 +68,12 @@ static uint8_t         s_disco_pub[32];
 static uint8_t         s_node_pub[32];
 static bool            s_inited = false;
 static pending_ping_t  s_pending[DISCO_PENDING_MAX];
+/* Per-WG-peer "already promoted to direct" flag. Set on the first valid
+ * Pong; later Pongs for the same WG peer (from races between candidates)
+ * are ignored so we don't toggle the endpoint back and forth across
+ * unreachable interfaces. Cleared when the peer is removed from the
+ * netmap (or, conservatively, never — re-init zeros it). */
+static bool            s_verified[DISCO_VERIFIED_MAX];
 
 /* Forward decl — registered with wireguardif as the DISCO input callback. */
 static void ts_disco_rx(const uint8_t *data, size_t len,
@@ -164,6 +171,7 @@ esp_err_t ts_disco_init(const uint8_t disco_priv[32],
     memcpy(s_disco_pub,  disco_pub,  32);
     memcpy(s_node_pub,   node_pub,   32);
     memset(s_pending,    0, sizeof(s_pending));
+    memset(s_verified,   0, sizeof(s_verified));
     s_inited = true;
 
     wireguard_esp32_set_disco_input(ts_disco_rx);
@@ -318,14 +326,28 @@ static void ts_disco_rx(const uint8_t *data, size_t len,
             ESP_LOGW(TAG, "Pong txid match but disco_pub mismatch (drop)");
             return;
         }
+        uint8_t wg_idx = pp->wg_peer_index;
         pp->in_use = false;
+
+        /* First valid Pong wins. Later pongs for the same WG peer
+         * (multi-probe races among candidates) shouldn't toggle the
+         * endpoint back to a path that was simply slower-but-still-
+         * reachable. */
+        if (wg_idx < DISCO_VERIFIED_MAX && s_verified[wg_idx]) {
+            ESP_LOGD(TAG, "Pong from %08x:%u for peer %u — already direct",
+                     (unsigned)ip_2_ip4(src_ip)->addr, (unsigned)src_port,
+                     wg_idx);
+            return;
+        }
+        if (wg_idx < DISCO_VERIFIED_MAX) s_verified[wg_idx] = true;
+
         ESP_LOGI(TAG, "Pong recv from %u.%u.%u.%u:%u → peer %u direct",
                  (unsigned)((ip_2_ip4(src_ip)->addr      ) & 0xFF),
                  (unsigned)((ip_2_ip4(src_ip)->addr >>  8) & 0xFF),
                  (unsigned)((ip_2_ip4(src_ip)->addr >> 16) & 0xFF),
                  (unsigned)((ip_2_ip4(src_ip)->addr >> 24) & 0xFF),
-                 (unsigned)src_port, pp->wg_peer_index);
-        wireguard_esp32_update_endpoint(pp->wg_peer_index, src_ip, src_port);
+                 (unsigned)src_port, wg_idx);
+        wireguard_esp32_update_endpoint(wg_idx, src_ip, src_port);
         break;
     }
     default:

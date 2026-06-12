@@ -265,6 +265,10 @@ void do_boot_sequence(const BootDeps& d) {
     }
 
     char line[160];
+    /* Build the IConnection unconditionally. The first start() is best-
+     * effort; if it fails (transient DNS, peer not yet routable while
+     * WG flips off DERP, etc.) we still hand the same connection to the
+     * reconnect supervisor, which retries with exponential backoff. */
     std::unique_ptr<tab5::IConnection> c;
 #if CONFIG_TAB5_SSH_ENABLED
     if (P.proto == tab5::ConnProto::SSH) {
@@ -281,8 +285,7 @@ void do_boot_sequence(const BootDeps& d) {
             .rows = d.rows,
             .task_stack_bytes = CONFIG_TAB5_SSH_RX_TASK_STACK,
         };
-        auto s = std::make_unique<tab5::SshConnection>(scfg);
-        if (s->start(d.remote_rx)) c = std::move(s);
+        c = std::make_unique<tab5::SshConnection>(scfg);
     }
 #endif
 #if CONFIG_TAB5_TELNET_ENABLED
@@ -298,8 +301,7 @@ void do_boot_sequence(const BootDeps& d) {
             .rows = d.rows,
             .task_stack_bytes = CONFIG_TAB5_TELNET_RX_TASK_STACK,
         };
-        auto t = std::make_unique<tab5::TelnetConnection>(tcfg);
-        if (t->start(d.remote_rx)) c = std::move(t);
+        c = std::make_unique<tab5::TelnetConnection>(tcfg);
     }
 #endif
     if (!c && P.proto == tab5::ConnProto::UsbSerial) {
@@ -310,24 +312,42 @@ void do_boot_sequence(const BootDeps& d) {
             .stop_bits = 0,
             .parity    = 0,
         };
-        auto u = std::make_unique<tab5::UsbSerialConnection>(ucfg);
-        if (u->start(d.remote_rx)) c = std::move(u);
+        c = std::make_unique<tab5::UsbSerialConnection>(ucfg);
     }
 
-    if (c) {
+    if (!c) {
+        d.term_write("\x1b[31mRemote: unsupported protocol\x1b[0m\r\n"sv);
+        tab5::boot_progress::set(Stage::Failed, "remote");
+        return;
+    }
+
+    /* Attempt 1: in-line. */
+    bool up = c->start(d.remote_rx);
+    if (up) {
         std::snprintf(line, sizeof(line),
                       "\x1b[32m%s connected\x1b[0m  %s\r\n",
                       c->kind(), c->host_label());
         d.term_write(line);
-        tab5::set_active_connection(c.get());
-        tab5::start_reconnect_supervisor(c.get(), d.remote_rx, d.get_pty_size);
-        g_conn = std::move(c);
         tab5::boot_progress::set(Stage::Done, "remote up");
     } else {
-        d.term_write("\x1b[31mRemote connect failed\x1b[0m  "
-                     "(falling back to local echo)\r\n"sv);
-        tab5::boot_progress::set(Stage::Failed, "remote");
+        std::snprintf(line, sizeof(line),
+                      "\x1b[33m%s connect failed — supervisor will retry\x1b[0m\r\n",
+                      c->kind());
+        d.term_write(line);
+        /* Still mark Done so the boot-progress overlay clears; the
+         * supervisor below owns the retry loop and the status panel
+         * already shows the SSH state via active_connection(). */
+        tab5::boot_progress::set(Stage::Done, "remote retry");
     }
+
+    /* Wire the connection in either way. The supervisor will keep
+     * trying start() on it with the reconnect.cpp backoff policy
+     * (1 s → 30 s). Once a session lands, RX bytes flow through
+     * d.remote_rx and active_connection() lets keystrokes reach the
+     * remote. */
+    tab5::set_active_connection(c.get());
+    tab5::start_reconnect_supervisor(c.get(), d.remote_rx, d.get_pty_size);
+    g_conn = std::move(c);
 }
 
 void boot_task(void* arg) {
