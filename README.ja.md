@@ -57,7 +57,24 @@ docs/                          ドキュメント
 M5_IDF6_PATCHES.md             M5GFX / M5Unified の IDF 6.0 パッチ一覧
 ```
 
-## 必要環境
+## クイックスタート — リリース済みファームを書き込む
+
+一番手軽な方法は **Web Flasher** です:
+
+<https://ciniml.github.io/portable_terminal/>
+
+Tab5 を USB で接続し、リリースを選んで Flash を押すだけ。Chrome / Edge など
+WebSerial 対応ブラウザが必要です。C6 ファームが対応バージョンに更新されている必要が
+あります (後述の「Wi-Fi C6 ファーム」参照)。Wi-Fi を使わずローカル UART だけで
+動作確認する用途であれば、本アプリのみ書き込んでそのまま使えます。
+
+リリース成果物は [GitHub Releases](https://github.com/ciniml/portable_terminal/releases)
+からもダウンロードできます。各リリース ZIP には単一ファイル形式の
+`firmware-vX.Y.Z.bin` と、esptool 用に分割した `bootloader.bin` /
+`partition-table.bin` / `ota_data_initial.bin` / `tab5_claude_client.bin`
+が同梱されています。
+
+## 必要環境 (ソースからビルドする場合)
 
 - **ESP-IDF 6.0** を `~/esp-idf/6.0` に展開
   ```bash
@@ -66,7 +83,7 @@ M5_IDF6_PATCHES.md             M5GFX / M5Unified の IDF 6.0 パッチ一覧
 - Tab5 上の C6 に対応スレーブファーム (後述「Wi-Fi C6 ファーム」参照)
 - ホストテスト用に CMake ≥ 3.22、GCC ≥ 13 または Clang ≥ 17 (C++23)
 
-## ビルドとフラッシュ
+## ソースからのビルドとフラッシュ
 
 ```bash
 git clone --recursive git@github.com:ciniml/portable_terminal.git

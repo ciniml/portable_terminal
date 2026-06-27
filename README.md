@@ -60,7 +60,24 @@ docs/                          Documentation
 M5_IDF6_PATCHES.md             Notes on local M5GFX/M5Unified IDF 6.0 patches
 ```
 
-## Prerequisites
+## Quick start — flash a pre-built release
+
+The fastest way to try the firmware is the **Web Flasher**:
+
+<https://ciniml.github.io/portable_terminal/>
+
+Connect your Tab5 via USB, pick a tagged release, and click Flash. Requires
+Chrome / Edge with WebSerial support. Note that the C6 needs to already be
+running compatible firmware — see "Wi-Fi C6 firmware" below if Wi-Fi isn't
+needed yet you can still flash the main app and use UART input.
+
+Released artifacts are also downloadable from
+[GitHub Releases](https://github.com/ciniml/portable_terminal/releases) — each
+release ZIP contains a single packed `firmware-vX.Y.Z.bin` plus the individual
+`bootloader.bin` / `partition-table.bin` / `ota_data_initial.bin` / `tab5_claude_client.bin`
+for use with esptool.
+
+## Prerequisites (for building from source)
 
 - **ESP-IDF 6.0** at `~/esp-idf/6.0`
   ```bash
@@ -69,7 +86,7 @@ M5_IDF6_PATCHES.md             Notes on local M5GFX/M5Unified IDF 6.0 patches
 - Compatible C6 slave firmware on the Tab5 (see "Wi-Fi C6 firmware" below)
 - For host tests: CMake ≥ 3.22, GCC ≥ 13 or Clang ≥ 17 (C++23)
 
-## Building and flashing
+## Building and flashing from source
 
 ```bash
 git clone --recursive git@github.com:ciniml/portable_terminal.git

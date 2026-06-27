@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tab5_claude_client Web Flasher</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+         margin: 0; padding: 1.5rem; max-width: 760px; margin-inline: auto; line-height: 1.5; }
+  h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+  .sub { opacity: .7; font-size: .9rem; margin-bottom: 1.25rem; }
+  fieldset { border: 1px solid #888; border-radius: 6px; padding: .8rem 1rem; margin: 0 0 1rem; }
+  legend { padding: 0 .35rem; font-weight: 600; }
+  label { display: inline-flex; align-items: center; gap: .4rem; margin-right: 1rem; }
+  select, button { font: inherit; padding: .35rem .6rem; border-radius: 4px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  #log, #monitorLog { background: #111; color: #eee; padding: .8rem; border-radius: 6px;
+         min-height: 12rem; max-height: 24rem; overflow: auto; white-space: pre-wrap;
+         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .85rem; }
+  #monitorLog { min-height: 18rem; max-height: 32rem; }
+  progress { width: 100%; height: 1.1rem; }
+  .warn { color: #c33; }
+  .ok { color: #2a8; }
+  .small { font-size: .85rem; opacity: .8; }
+  a { color: inherit; }
+  .links { margin: 1rem 0; font-size: .9rem; }
+  .links a { margin-right: 1rem; }
+  .note { background: rgba(127,127,127,.12); border-left: 3px solid #888;
+          padding: .55rem .8rem; border-radius: 4px; margin: .8rem 0; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>📟 tab5_claude_client Web Flasher</h1>
+<p class="sub">
+  ブラウザから M5Stack Tab5 (ESP32-P4) にターミナルファームウェアを書き込みます。
+  <br>Chrome / Edge など <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API#browser_compatibility" target="_blank" rel="noopener">WebSerial 対応ブラウザ</a> が必要です。
+</p>
+
+<p class="links">
+  ▶ <a href="https://github.com/ciniml/portable_terminal" target="_blank" rel="noopener">GitHub リポジトリ</a>
+  ▶ <a href="https://github.com/ciniml/portable_terminal/releases" target="_blank" rel="noopener">リリース一覧</a>
+  ▶ <a href="https://github.com/ciniml/portable_terminal/blob/main/README.md" target="_blank" rel="noopener">README (英)</a>
+  ▶ <a href="https://github.com/ciniml/portable_terminal/blob/main/README.ja.md" target="_blank" rel="noopener">README (日)</a>
+</p>
+
+<div class="note">
+  <strong>注意:</strong> Tab5 出荷時の ESP32-C6 ファームウェアは <code>esp_hosted</code> 1.4.x で、本ファームウェア (2.x 系) と非互換です。
+  Wi-Fi を使う場合はリポジトリ README の「Wi-Fi C6 ファーム」セクションに従って先に C6 を更新してください。
+  Wi-Fi を使わずローカル UART 入出力のみで試す場合はそのまま書き込んで動作確認できます。
+</div>
+
+<fieldset>
+  <legend>1. デバイス接続 / Connect</legend>
+  <div class="row">
+    <label>Baud:
+      <select id="selBaud">
+        <option value="115200">115200</option>
+        <option value="460800">460800</option>
+        <option value="921600">921600</option>
+        <option value="2000000" selected>2000000</option>
+      </select>
+    </label>
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <span id="chipInfo" class="small"></span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>2. リリース選択 / Select release</legend>
+  <div class="row">
+    <label>Version: <select id="selVersion"><option>loading…</option></select></label>
+    <button id="btnReload" title="Reload release list">↻</button>
+  </div>
+  <div id="assetInfo" class="small"></div>
+</fieldset>
+
+<fieldset>
+  <legend>3. 書き込み / Flash</legend>
+  <div class="row">
+    <label><input type="checkbox" id="chkErase"> Erase flash before write</label>
+    <button id="btnFlash" disabled>Flash</button>
+  </div>
+  <progress id="prog" value="0" max="100"></progress>
+</fieldset>
+
+<fieldset>
+  <legend>4. シリアルモニタ / Monitor</legend>
+  <p class="small" style="margin:.2rem 0 .6rem">
+    フラッシュ後にデバイスのログを確認できます。Connect/Disconnect とは別系統で、
+    Flash で使った USB ポートを再利用します(一度認可済みなら再選択不要)。
+  </p>
+  <div class="row">
+    <label>Baud:
+      <select id="selMonitorBaud">
+        <option value="115200" selected>115200</option>
+        <option value="921600">921600</option>
+        <option value="2000000">2000000</option>
+      </select>
+    </label>
+    <button id="btnMonitorStart">Start</button>
+    <button id="btnMonitorStop" disabled>Stop</button>
+    <button id="btnMonitorClear">Clear</button>
+    <label><input type="checkbox" id="chkMonitorAutostart" checked> Flash 完了後に自動開始</label>
+  </div>
+  <pre id="monitorLog"></pre>
+</fieldset>
+
+<fieldset>
+  <legend>Log</legend>
+  <pre id="log"></pre>
+</fieldset>
+
+<p class="small">
+  Bundled with <a href="https://github.com/espressif/esptool-js" target="_blank" rel="noopener">esptool-js</a>.
+  Source: <a href="https://github.com/ciniml/portable_terminal" target="_blank" rel="noopener">ciniml/portable_terminal</a>.
+</p>
+
+<script type="module">
+import { ESPLoader, Transport } from './esptool.js';
+
+// Initial-flash layout for tab5_claude_client partition table (see partitions.csv).
+//   bootloader            @ 0x2000  — ESP32-P4 ROM bootloader looks here, not 0x0
+//   partition-table       @ 0x8000
+//   ota_data_initial      @ 0xd000  — empty/all-FF, makes ota_0 the active slot
+//   tab5_claude_client    @ 0x10000 — the running app in ota_0
+// ota_1 is left blank; an OTA update from the running app (when one is wired
+// up in a future phase) fills it. All four .bin files ship inside the
+// release ZIP — no `local` fallback needed.
+const FLASH_PARTS = [
+  { name: 'bootloader.bin',          address: 0x2000  },
+  { name: 'partition-table.bin',     address: 0x8000  },
+  { name: 'ota_data_initial.bin',    address: 0xd000  },
+  { name: 'tab5_claude_client.bin',  address: 0x10000 },
+];
+
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+const progEl = $('prog');
+const chipInfoEl = $('chipInfo');
+const assetInfoEl = $('assetInfo');
+
+function log(msg, cls) {
+  const line = document.createElement('span');
+  if (cls) line.className = cls;
+  line.textContent = msg + '\n';
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+const terminal = {
+  clean: () => { logEl.textContent = ''; },
+  writeLine: (s) => log(s),
+  write: (s) => { logEl.append(s); logEl.scrollTop = logEl.scrollHeight; },
+};
+
+if (!('serial' in navigator)) {
+  log('WebSerial API がこのブラウザではサポートされていません。', 'warn');
+  log('Please use Chrome / Edge / Opera on desktop.', 'warn');
+}
+if (typeof DecompressionStream === 'undefined') {
+  log('DecompressionStream API がサポートされていません (Chrome 103+ / Edge 103+ / Safari 16.4+ が必要)。', 'warn');
+}
+
+let transport = null;
+let loader = null;
+let releases = [];
+
+// --- ZIP extraction (deflate-raw via DecompressionStream, no deps) ---
+async function extractZip(buffer) {
+  const dv = new DataView(buffer);
+  const view = new Uint8Array(buffer);
+  const len = buffer.byteLength;
+
+  // Locate End of Central Directory record (signature 0x06054b50).
+  // Search the last 64KB + 22 bytes (max comment size).
+  let eocd = -1;
+  const minOffset = Math.max(0, len - (0xffff + 22));
+  for (let i = len - 22; i >= minOffset; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('ZIP: EOCD not found');
+
+  const totalEntries = dv.getUint16(eocd + 10, true);
+  const cdOffset = dv.getUint32(eocd + 16, true);
+
+  const decoder = new TextDecoder('utf-8');
+  const entries = new Map();
+  let p = cdOffset;
+  for (let i = 0; i < totalEntries; i++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('ZIP: bad central dir entry');
+    const compMethod = dv.getUint16(p + 10, true);
+    const compSize   = dv.getUint32(p + 20, true);
+    const nameLen    = dv.getUint16(p + 28, true);
+    const extraLen   = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true);
+    const localOff   = dv.getUint32(p + 42, true);
+    const name = decoder.decode(view.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/')) continue;
+    if (dv.getUint32(localOff, true) !== 0x04034b50) throw new Error('ZIP: bad local header');
+    const lNameLen  = dv.getUint16(localOff + 26, true);
+    const lExtraLen = dv.getUint16(localOff + 28, true);
+    const dataStart = localOff + 30 + lNameLen + lExtraLen;
+    const compData = view.subarray(dataStart, dataStart + compSize);
+
+    let outBuf;
+    if (compMethod === 0) {
+      outBuf = compData.slice().buffer;
+    } else if (compMethod === 8) {
+      const stream = new Blob([compData]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      outBuf = await new Response(stream).arrayBuffer();
+    } else {
+      throw new Error(`ZIP: unsupported compression method ${compMethod} for ${name}`);
+    }
+    const baseName = name.split('/').pop();
+    entries.set(baseName, outBuf);
+  }
+  return entries;
+}
+
+// --- Release list (from same-origin versions.json staged by CI) ---
+async function loadReleases() {
+  const sel = $('selVersion');
+  sel.innerHTML = '<option>loading…</option>';
+  assetInfoEl.textContent = '';
+  try {
+    const r = await fetch('./versions.json', { cache: 'no-cache' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    releases = await r.json();
+    if (!releases.length) {
+      sel.innerHTML = '<option value="">(no releases)</option>';
+      return;
+    }
+    sel.innerHTML = '';
+    for (const rel of releases) {
+      const o = document.createElement('option');
+      o.value = rel.tag;
+      o.textContent = rel.tag;
+      sel.appendChild(o);
+    }
+    sel.dispatchEvent(new Event('change'));
+  } catch (e) {
+    log('Failed to fetch versions.json: ' + e.message, 'warn');
+    sel.innerHTML = '<option value="">(error)</option>';
+  }
+}
+
+function selectedRelease() {
+  const tag = $('selVersion').value;
+  return releases.find((r) => r.tag === tag);
+}
+
+function zipUrlFor(rel) {
+  if (!rel || !rel.zip) return null;
+  return `./firmware/${rel.tag}/${rel.zip}`;
+}
+
+function showAssetSummary() {
+  const rel = selectedRelease();
+  assetInfoEl.innerHTML = '';
+  if (!rel) return;
+  const span = document.createElement('span');
+  if (rel.zip) {
+    span.className = 'ok';
+    span.textContent = `ZIP: ${rel.zip}`;
+    $('btnFlash').disabled = !loader;
+  } else {
+    span.className = 'warn';
+    span.textContent = `このリリース (${rel.tag}) には firmware ZIP がありません。`;
+    $('btnFlash').disabled = true;
+  }
+  assetInfoEl.appendChild(span);
+}
+
+$('selVersion').addEventListener('change', showAssetSummary);
+$('btnReload').addEventListener('click', loadReleases);
+
+// --- Connect / Disconnect ---
+$('btnConnect').addEventListener('click', async () => {
+  try {
+    const port = await navigator.serial.requestPort();
+    transport = new Transport(port, false);
+    const baud = parseInt($('selBaud').value, 10) || 460800;
+    loader = new ESPLoader({
+      transport,
+      baudrate: baud,
+      romBaudrate: 115200,
+      terminal,
+      debugLogging: false,
+    });
+    const chip = await loader.main();
+    chipInfoEl.textContent = `Detected: ${chip}`;
+    if (!String(chip).toLowerCase().includes('esp32-p4')) {
+      log(`警告: 検出されたチップ "${chip}" は ESP32-P4 ではありません。書き込みは動作しない可能性があります。`, 'warn');
+    }
+    $('btnConnect').disabled = true;
+    $('btnDisconnect').disabled = false;
+    $('btnFlash').disabled = false;
+  } catch (e) {
+    log('Connect failed: ' + (e?.message || e), 'warn');
+    transport = null; loader = null;
+  }
+});
+
+$('btnDisconnect').addEventListener('click', async () => {
+  try {
+    if (transport) await transport.disconnect();
+  } catch (e) { log('Disconnect error: ' + e.message, 'warn'); }
+  transport = null; loader = null;
+  chipInfoEl.textContent = '';
+  $('btnConnect').disabled = false;
+  $('btnDisconnect').disabled = true;
+  $('btnFlash').disabled = true;
+});
+
+// --- Flash ---
+$('btnFlash').addEventListener('click', async () => {
+  if (!loader) { log('Not connected.', 'warn'); return; }
+  const rel = selectedRelease();
+  if (!rel) { log('No release selected.', 'warn'); return; }
+  const zipUrl = zipUrlFor(rel);
+  if (!zipUrl) {
+    log(`このリリース (${rel.tag}) には firmware ZIP がありません。`, 'warn');
+    return;
+  }
+
+  $('btnFlash').disabled = true;
+  $('btnDisconnect').disabled = true;
+  progEl.value = 0;
+
+  let entries;
+  try {
+    log(`Downloading ${rel.zip}…`);
+    const r = await fetch(zipUrl);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const zipBuf = await r.arrayBuffer();
+    log(`Extracting ZIP (${zipBuf.byteLength} bytes)…`);
+    entries = await extractZip(zipBuf);
+    log('Extracted: ' + [...entries.keys()].join(', '));
+  } catch (e) {
+    log('ZIP download/extract failed: ' + e.message, 'warn');
+    $('btnFlash').disabled = false;
+    $('btnDisconnect').disabled = false;
+    return;
+  }
+
+  const fileArray = [];
+  for (const part of FLASH_PARTS) {
+    const buf = entries.get(part.name);
+    if (!buf) {
+      log(`Failed to load ${part.name}: not found in ZIP`, 'warn');
+      $('btnFlash').disabled = false;
+      $('btnDisconnect').disabled = false;
+      return;
+    }
+    fileArray.push({ data: new Uint8Array(buf), address: part.address });
+  }
+
+  try {
+    const totalSize = fileArray.reduce((s, f) => s + f.data.length, 0);
+    let curIdx = -1;
+    let curBase = 0;
+    let prevDone = 0;
+    await loader.writeFlash({
+      fileArray,
+      flashSize: 'keep',
+      flashMode: 'keep',
+      flashFreq: 'keep',
+      eraseAll: $('chkErase').checked,
+      compress: true,
+      reportProgress: (fileIndex, written, total) => {
+        if (fileIndex !== curIdx) {
+          curBase = prevDone;
+          curIdx = fileIndex;
+        }
+        const done = curBase + written;
+        prevDone = curBase + total;
+        progEl.value = Math.min(100, (done / totalSize) * 100);
+      },
+    });
+    progEl.value = 100;
+    log('Flash complete. Resetting…', 'ok');
+    // Tab5 uses the ESP32-P4 internal USB-Serial-JTAG bridge (no external
+    // USB-UART chip), so the USB-JTAG reset variant is what actually
+    // reboots the chip after flashing.
+    try {
+      await loader.after('hard_reset', true);
+    } catch (e) {
+      log('after("hard_reset", true) failed, falling back: ' + e.message, 'warn');
+      try { await loader.after(); } catch (_) { /* ignore */ }
+    }
+    // Release the port so the device's own USB-CDC can come up after
+    // boot — leaving the WebSerial session attached blocks it.
+    try { if (transport) await transport.disconnect(); } catch (_) { /* ignore */ }
+    transport = null;
+    loader = null;
+    chipInfoEl.textContent = '';
+    $('btnConnect').disabled = false;
+    $('btnDisconnect').disabled = true;
+    log('Done — device reset and USB port released.', 'ok');
+  } catch (e) {
+    log('Flash failed: ' + (e?.message || e), 'warn');
+  } finally {
+    $('btnFlash').disabled = !loader;
+  }
+});
+
+// --- Serial monitor -------------------------------------------------
+//
+// Reuses the WebSerial port the user already authorised for flashing.
+// navigator.serial.getPorts() returns previously-granted ports without
+// re-prompting — if there's exactly one we just open it; otherwise we
+// fall through to requestPort() which raises the picker again.
+
+let monitorPort = null;
+let monitorReader = null;
+let monitorAbort = null;
+let monitorPartialAnsi = '';
+const monitorLogEl = $('monitorLog');
+
+const MONITOR_LOG_MAX_CHARS = 256 * 1024;
+const MONITOR_LOG_TRIM_TO   = 192 * 1024;
+
+function appendMonitor(text) {
+  // Strip ANSI CSI sequences. ESP-IDF logs colour by level so the raw stream
+  // is full of `\x1b[0;33m` etc. Handle splits across reads by stashing an
+  // incomplete sequence and prepending on the next call.
+  text = monitorPartialAnsi + text;
+  monitorPartialAnsi = '';
+  const trailing = text.match(/\x1b\[?[0-9;]*$/);
+  if (trailing && trailing.index === text.length - trailing[0].length) {
+    monitorPartialAnsi = trailing[0];
+    text = text.slice(0, trailing.index);
+  }
+  text = text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+
+  if (!text) return;
+  monitorLogEl.appendChild(document.createTextNode(text));
+  if (monitorLogEl.textContent.length > MONITOR_LOG_MAX_CHARS) {
+    monitorLogEl.textContent = monitorLogEl.textContent.slice(-MONITOR_LOG_TRIM_TO);
+  }
+  monitorLogEl.scrollTop = monitorLogEl.scrollHeight;
+}
+
+async function startMonitor() {
+  if (monitorPort) return;
+  try {
+    let port;
+    const existing = await navigator.serial.getPorts();
+    if (existing.length === 1) {
+      port = existing[0];
+    } else {
+      port = await navigator.serial.requestPort();
+    }
+    const baud = parseInt($('selMonitorBaud').value, 10) || 115200;
+    await port.open({ baudRate: baud, bufferSize: 4096 });
+    monitorPort = port;
+    monitorAbort = new AbortController();
+    $('btnMonitorStart').disabled = true;
+    $('btnMonitorStop').disabled = false;
+    log(`Monitor started @ ${baud}`, 'ok');
+    pumpMonitor(monitorAbort.signal);
+  } catch (e) {
+    log('Monitor start failed: ' + (e?.message || e), 'warn');
+    monitorPort = null;
+  }
+}
+
+async function pumpMonitor(signal) {
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  while (!signal.aborted && monitorPort && monitorPort.readable) {
+    const reader = monitorPort.readable.getReader();
+    monitorReader = reader;
+    try {
+      while (!signal.aborted) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength) {
+          appendMonitor(decoder.decode(value, { stream: true }));
+        }
+      }
+    } catch (e) {
+      if (!signal.aborted) {
+        log('Monitor read error: ' + (e?.message || e), 'warn');
+      }
+      break;
+    } finally {
+      try { reader.releaseLock(); } catch (_) {}
+      monitorReader = null;
+    }
+  }
+}
+
+async function stopMonitor() {
+  if (!monitorPort) return;
+  monitorAbort?.abort();
+  try { await monitorReader?.cancel(); } catch (_) {}
+  try { await monitorPort.close(); } catch (_) {}
+  monitorPort = null;
+  monitorAbort = null;
+  monitorReader = null;
+  monitorPartialAnsi = '';
+  $('btnMonitorStart').disabled = false;
+  $('btnMonitorStop').disabled = true;
+  log('Monitor stopped.', 'ok');
+}
+
+$('btnMonitorStart').addEventListener('click', startMonitor);
+$('btnMonitorStop').addEventListener('click', stopMonitor);
+$('btnMonitorClear').addEventListener('click', () => { monitorLogEl.textContent = ''; });
+
+// Auto-stop monitor when flash flow needs the port.
+$('btnFlash').addEventListener('click', async () => {
+  if (monitorPort) {
+    log('Stopping monitor for flash…');
+    await stopMonitor();
+  }
+}, /*useCapture=*/true);
+
+// Auto-start monitor after flash completes (detected via log line emission).
+new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    for (const n of m.addedNodes) {
+      if (n.textContent && n.textContent.includes('USB port released')) {
+        if ($('chkMonitorAutostart').checked && !monitorPort) {
+          setTimeout(() => startMonitor(), 800);
+        }
+      }
+    }
+  }
+}).observe(logEl, { childList: true });
+
+loadReleases();
+</script>
+</body>
+</html>

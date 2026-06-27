@@ -1,0 +1,87 @@
+name: Deploy GitHub Pages
+
+# Stages docs/ + every published release's firmware ZIP into a single static
+# site. Refreshed on doc edits, on each release publish, and on demand.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage docs/ into _site/
+        run: |
+          mkdir -p _site
+          cp -a docs/. _site/
+
+      - name: Stage release firmware ZIPs into _site/firmware/<tag>/
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p _site/firmware
+          tags_json=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+                        --json tagName,isDraft,isPrerelease)
+          mapfile -t tags < <(echo "$tags_json" | jq -r '.[] | select(.isDraft|not) | .tagName')
+
+          # Per-tag NDJSON record. Each release publishes one
+          # firmware-<tag>.zip asset (single-board project, no per-board
+          # matrix). We stage it under firmware/<tag>/ and record it in
+          # versions.json so the web flasher can find it.
+          : > /tmp/per_tag.ndjson
+          for tag in "${tags[@]}"; do
+            asset=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
+                     --jq '.assets[] | select(.name|test("^firmware-.*\\.zip$")) | .name' \
+                     | head -1)
+            if [ -z "$asset" ]; then
+              echo "[skip] $tag: no firmware ZIP asset"
+              continue
+            fi
+            dest="_site/firmware/$tag"
+            mkdir -p "$dest"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p "$asset" -D "$dest" --clobber
+            echo "[ok] $tag -> $dest/$asset"
+            echo "{\"tag\":\"$tag\",\"zip\":\"$asset\"}" >> /tmp/per_tag.ndjson
+          done
+
+          # versions.json: ordered list of {tag, zip}. The web flasher
+          # fetches this and presents the tag selector.
+          jq -s '.' < /tmp/per_tag.ndjson > _site/versions.json
+          echo "--- versions.json ---"
+          cat _site/versions.json
+          echo "--- _site/firmware ---"
+          find _site/firmware -maxdepth 2 -type f | sort
+
+      - uses: actions/configure-pages@v5
+        with:
+          # Auto-enable GitHub Pages with the "GitHub Actions" source on
+          # first run. Without this the action returns 404 ("Get Pages
+          # site failed") unless someone manually enables Pages in
+          # Settings → Pages first.
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
