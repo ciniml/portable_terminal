@@ -175,6 +175,11 @@ Open the Tab5 cover, wire an ESP-Prog to the C6 programming pads
 ./slave_c6_fw/flash.sh /dev/ttyUSB0
 ```
 
+**Subsequent 2.x → 2.x updates are automatic.** Once the C6 is on a 2.x
+slave the main app handles future bumps at boot via the embedded
+`c6_fw` partition — see [docs/C6_FW_UPDATE.md](docs/C6_FW_UPDATE.md) for
+the full flow and log messages.
+
 ## Usage
 
 After flashing:

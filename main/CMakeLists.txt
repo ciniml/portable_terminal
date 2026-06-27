@@ -31,6 +31,7 @@ idf_component_register(
         "soft_keyboard.cpp"
         "wifi_config.cpp"
         "wifi_setup.cpp"
+        "c6_fw_update.cpp"
         "connection.cpp"
         "profiles.cpp"
         "reconnect.cpp"
@@ -54,6 +55,12 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        # c6_fw_update.cpp reads the embedded slave fw out of the c6_fw
+        # data partition and streams it to the C6 via esp_hosted's RPC
+        # wrap layer (rpc_ota_begin/write/end/activate forward-declared).
+        esp_partition
+        esp_app_format
+        espressif__esp_hosted
         libssh2
         mbedtls
         lwip

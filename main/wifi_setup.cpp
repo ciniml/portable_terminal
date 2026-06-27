@@ -12,6 +12,13 @@
 
 #include "M5Unified.h"
 
+#include "c6_fw_update.hpp"
+
+// esp_hosted_init runs in a constructor (port_esp_hosted_host_init.c); we
+// only need esp_hosted_get_coprocessor_fwversion + a check on transport
+// readiness from c6_fw_update.cpp, which pulls the header itself. No
+// direct esp_hosted include needed here.
+
 namespace tab5 {
 
 namespace {
@@ -123,6 +130,24 @@ term::Result<void> wifi_sta_connect(std::string_view ssid,
     vTaskDelay(pdMS_TO_TICKS(300));
     tab5_c6_power_enable(true);
     vTaskDelay(pdMS_TO_TICKS(1500));
+
+    // Boot-time C6 slave-firmware auto-update. esp_hosted_init has already
+    // been called from its constructor; once the C6 finishes its post-
+    // power-up handshake the transport is up and we can query the version.
+    // c6_fw::update_if_needed() polls briefly for that, returns 0 if the
+    // C6 is up to date or no embedded blob is present, 1 if it streamed
+    // a newer image. After a successful update we restart so the C6
+    // boots into its new image and the host transport handshakes fresh.
+    int c6_upd = tab5::c6_fw::update_if_needed();
+    if (c6_upd == 1) {
+        ESP_LOGW(kTag,
+                 "C6 firmware updated — restarting P4 to renegotiate link.");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    } else if (c6_upd == -1) {
+        ESP_LOGE(kTag, "C6 firmware auto-update failed; continuing "
+                 "with the existing slave image.");
+    }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||

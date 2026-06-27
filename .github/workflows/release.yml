@@ -129,6 +129,14 @@ jobs:
           cp build/partition_table/partition-table.bin "$outdir/"
           cp build/ota_data_initial.bin                "$outdir/"
           cp build/tab5_claude_client.bin              "$outdir/"
+          # c6_fw.bin is built only when slave_c6_fw/network_adapter.bin (or
+          # the c6_updater fallback path) was present at configure time —
+          # CI populates it via the build step's slave fw checkout. If it
+          # didn't end up in build/, ship the release without it; the Web
+          # Flasher / esptool will then just skip the optional offset.
+          if [ -f build/c6_fw.bin ]; then
+              cp build/c6_fw.bin                       "$outdir/"
+          fi
           cp build/flash_args                          "$outdir/"
           cp "firmware-${VERSION}.bin"                 "$outdir/"
           cp README.md                                 "$outdir/" 2>/dev/null || true

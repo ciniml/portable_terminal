@@ -6,3 +6,13 @@ phy_init, data, phy,     0xf000,  0x1000,
 ota_0,    app,  ota_0,   0x10000, 0x300000,
 ota_1,    app,  ota_1,  0x310000, 0x300000,
 storage,  data, spiffs,  0x610000, 0x100000,
+# c6_fw — embedded ESP32-C6 slave firmware (network_adapter.bin image) used
+# by main/c6_fw_update.cpp at boot to refresh the on-board C6 over RPC OTA
+# whenever the embedded version is strictly newer than the version running
+# on the C6.
+#
+# Subtype `undefined` (0x06): this is raw co-processor app data from the
+# P4's point of view, not an IDF app the P4 bootloader would ever try to
+# parse. Using `app, factory` would make IDF treat this slot as another P4-
+# app candidate (otadata / boot-app selection), which we don't want.
+c6_fw,    data, undefined, 0x710000, 0x180000,

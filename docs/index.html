@@ -136,6 +136,11 @@ const FLASH_PARTS = [
   { name: 'partition-table.bin',     address: 0x8000  },
   { name: 'ota_data_initial.bin',    address: 0xd000  },
   { name: 'tab5_claude_client.bin',  address: 0x10000 },
+  // c6_fw is the embedded ESP32-C6 slave fw image, consumed at boot by
+  // main/c6_fw_update.cpp for the on-device auto-update path. Older
+  // release ZIPs (before this partition existed) don't ship c6_fw.bin —
+  // mark it optional so the flasher still works against those.
+  { name: 'c6_fw.bin',               address: 0x710000, optional: true },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -353,6 +358,10 @@ $('btnFlash').addEventListener('click', async () => {
   for (const part of FLASH_PARTS) {
     const buf = entries.get(part.name);
     if (!buf) {
+      if (part.optional) {
+        log(`(skip) ${part.name}: not in this ZIP (older release).`);
+        continue;
+      }
       log(`Failed to load ${part.name}: not found in ZIP`, 'warn');
       $('btnFlash').disabled = false;
       $('btnDisconnect').disabled = false;
