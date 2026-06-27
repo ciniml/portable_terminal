@@ -2,7 +2,7 @@ menu "Tab5 BLE configuration service"
 
     config TAB5_BLE_CONFIG_ENABLED
         bool "Enable BLE provisioning service"
-        default n
+        default y
         select BT_ENABLED
         select BT_CONTROLLER_DISABLED
         select BT_NIMBLE_ENABLED
@@ -20,9 +20,14 @@ menu "Tab5 BLE configuration service"
             selects the BT_NIMBLE + esp_hosted VHCI Kconfig values.
 
             Requires a C6 slave firmware built with Bluetooth
-            controller support. The standalone updater in c6_updater/
-            and the M5 factory firmware ship without BT enabled, so
-            this is OFF by default until the slave-fw work catches up.
+            controller support. esp_hosted's slave example already
+            ships BT_ENABLED=y + BT_CONTROLLER_ONLY=y for the c6
+            target (managed_components/.../slave/sdkconfig.defaults.
+            esp32c6), so a slave fw built via slave_c6_fw/build.sh
+            will have BT controller available. Once that blob is
+            installed (manually or via the boot-time auto-update —
+            see docs/C6_FW_UPDATE.md), the BLE setup channel works
+            out of the box.
 
     config TAB5_BLE_DEVICE_NAME
         string "BLE advertising name"

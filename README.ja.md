@@ -130,13 +130,20 @@ make build               # sdkconfig.defaults.local を読み込んでビルド
 | `CONFIG_TAILSCALE_AUTH_KEY` | Tailscale 認証鍵 (`tskey-auth-…`) |
 | `CONFIG_TAILSCALE_HOSTNAME` | tailnet に申告するホスト名 |
 | `CONFIG_TAILSCALE_LISTEN_PORT` | WireGuard UDP listen ポート (デフォルト 41641) |
-| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE プロビジョニング (β; 後述) |
+| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE プロビジョニング (デフォルト ON; 後述) |
 
-BLE 経由のプロビジョニング (β機能) も実装してあります。
-`CONFIG_TAB5_BLE_CONFIG_ENABLED=y` で有効化し、
-[`docs/settings.html`](docs/settings.html) の Web Bluetooth UI
-(Chrome / Edge 133+) から実行時に Wi-Fi / SSH / Tailscale を設定できます。
-C6 スレーブ FW を BT コントローラー込みでビルドしておく必要があります。
+BLE 経由のプロビジョニングはデフォルト有効です。
+<https://ciniml.github.io/portable_terminal/settings.html>
+の Web Bluetooth UI (Chrome / Edge 133+) から実行時に
+Wi-Fi / SSH / Tailscale を設定できます。
+C6 スレーブ FW を BT コントローラー込みでビルドする必要がありますが、
+上流 esp_hosted のスレーブサンプルが ESP32-C6 ターゲット向けに
+`BT_ENABLED=y + BT_CONTROLLER_ONLY=y` を既定で持っているので、
+`slave_c6_fw/build.sh` で出来上がる blob にそのまま含まれます。
+一度書き込めば、起動時 C6 自動更新
+([`docs/C6_FW_UPDATE.md`](docs/C6_FW_UPDATE.md))
+が後続のリリースを追従させます。
+BLE が不要なら `CONFIG_TAB5_BLE_CONFIG_ENABLED=n` で約 100 KB 削減。
 プロトコルや脅威モデルは
 [`docs/BLE_CONFIG_DESIGN.md`](docs/BLE_CONFIG_DESIGN.md) を参照。
 
