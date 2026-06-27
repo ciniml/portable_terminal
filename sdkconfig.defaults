@@ -39,6 +39,15 @@ CONFIG_USB_HOST_ENABLE_FTDI_SIO_DRIVER=y
 # CONFIG_TAILSCALE_ENABLE=n + CONFIG_WIREGUARD_ENABLE=y in your
 # sdkconfig.defaults.local to bring up a hand-configured peer.
 
+# BLE provisioning service.
+# TAB5_BLE_CONFIG_ENABLED `select`s BT_ENABLED and the esp_hosted VHCI
+# transport. These two below sit inside Kconfig `choice` blocks that
+# `select` can't reach, so they have to be set as plain defaults:
+#   * BT_NIMBLE_ENABLED   — pick NimBLE over Bluedroid as the host stack
+#   * MBEDTLS_HKDF_C      — HKDF-SHA256 is required by the BLE crypto session
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_MBEDTLS_HKDF_C=y
+
 # Tailscale fans every tailnet peer into a separate WireGuard peer.
 # The WG default is 1 peer; raise to 16 so a typical tailnet fits
 # without "wireguardif_add_peer failed — max peers reached" spam.

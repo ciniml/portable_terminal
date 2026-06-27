@@ -132,13 +132,18 @@ Key options:
 | `CONFIG_TAILSCALE_AUTH_KEY` | Tailscale auth key (`tskey-auth-…`) |
 | `CONFIG_TAILSCALE_HOSTNAME` | Hostname advertised to the tailnet |
 | `CONFIG_TAILSCALE_LISTEN_PORT` | WireGuard UDP listen port (default 41641) |
-| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE provisioning service (β; see below) |
+| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE provisioning service (on by default; see below) |
 
-A BLE-based provisioning service (β) is also available — enable with
-`CONFIG_TAB5_BLE_CONFIG_ENABLED=y` and use the Web Bluetooth UI at
-`docs/settings.html` (Chrome / Edge 133+) to set Wi-Fi / SSH / Tailscale
-credentials at runtime without rebuilding. Requires a C6 slave firmware
-built with BT controller support. See
+A BLE-based provisioning service is on by default — use the Web Bluetooth
+UI at <https://ciniml.github.io/portable_terminal/settings.html> (Chrome /
+Edge 133+) to set Wi-Fi / SSH / Tailscale credentials at runtime without
+rebuilding. Requires a C6 slave firmware with BT controller support;
+`slave_c6_fw/build.sh` produces such a build (the upstream esp_hosted
+slave example already ships `BT_ENABLED=y + BT_CONTROLLER_ONLY=y` for the
+ESP32-C6 target). Once that blob is installed, the boot-time C6 auto-
+update (see [`docs/C6_FW_UPDATE.md`](docs/C6_FW_UPDATE.md)) keeps it
+current on every flash. Disable with `CONFIG_TAB5_BLE_CONFIG_ENABLED=n`
+if BLE isn't needed (saves ~100 KB of binary). See
 [`docs/BLE_CONFIG_DESIGN.md`](docs/BLE_CONFIG_DESIGN.md) for the protocol
 and threat model.
 
