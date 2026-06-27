@@ -130,6 +130,15 @@ make build               # sdkconfig.defaults.local を読み込んでビルド
 | `CONFIG_TAILSCALE_AUTH_KEY` | Tailscale 認証鍵 (`tskey-auth-…`) |
 | `CONFIG_TAILSCALE_HOSTNAME` | tailnet に申告するホスト名 |
 | `CONFIG_TAILSCALE_LISTEN_PORT` | WireGuard UDP listen ポート (デフォルト 41641) |
+| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE プロビジョニング (β; 後述) |
+
+BLE 経由のプロビジョニング (β機能) も実装してあります。
+`CONFIG_TAB5_BLE_CONFIG_ENABLED=y` で有効化し、
+[`docs/settings.html`](docs/settings.html) の Web Bluetooth UI
+(Chrome / Edge 133+) から実行時に Wi-Fi / SSH / Tailscale を設定できます。
+C6 スレーブ FW を BT コントローラー込みでビルドしておく必要があります。
+プロトコルや脅威モデルは
+[`docs/BLE_CONFIG_DESIGN.md`](docs/BLE_CONFIG_DESIGN.md) を参照。
 
 SSH 公開鍵認証を使う場合:
 

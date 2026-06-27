@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Tab5 BLE Settings</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif;
+         margin: 0 auto; max-width: 640px; padding: 1rem; line-height: 1.5; }
+  h1 { font-size: 1.4rem; margin-top: 0; }
+  h2 { font-size: 1.1rem; margin-top: 1.5rem; border-bottom: 1px solid #888; padding-bottom: 0.2rem; }
+  fieldset { border: 1px solid #888; border-radius: 6px; padding: 0.7rem 1rem; margin: 0.6rem 0; }
+  legend { padding: 0 0.4rem; font-weight: bold; }
+  label { display: block; font-size: 0.9rem; margin-top: 0.5rem; }
+  input[type=text], input[type=password], input[type=number] {
+    width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem;
+    border: 1px solid #888; border-radius: 4px; font-size: 1rem;
+  }
+  button { padding: 0.5rem 1rem; border: 1px solid #444; border-radius: 4px;
+           background: #f4f4f4; font-size: 1rem; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.primary { background: #3478f6; color: white; border-color: #2960c8; }
+  button.danger { background: #f4d4d4; }
+  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  .row > * { flex: 1 1 auto; }
+  .row > button { flex: 0 0 auto; }
+  .status-row { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.95rem; }
+  .dot { display: inline-block; width: 0.7em; height: 0.7em; border-radius: 50%;
+         background: #aaa; vertical-align: middle; margin-right: 0.3em; }
+  .dot.on { background: #3a3; }
+  #log { font-family: monospace; font-size: 0.85rem; background: #111; color: #eee;
+         padding: 0.5rem; border-radius: 4px; max-height: 12rem; overflow-y: auto; }
+  #log .err { color: #f88; }
+  #log .ok  { color: #8f8; }
+  .hint { font-size: 0.85rem; color: #888; }
+  .toolbar { position: sticky; top: 0; background: var(--bg, white); z-index: 10;
+             padding: 0.4rem 0; border-bottom: 1px solid #888; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #181818; color: #eee; }
+    input { background: #222; color: #eee; }
+    button { background: #333; color: #eee; border-color: #555; }
+    button.primary { background: #3478f6; color: white; }
+    button.danger  { background: #5a2a2a; color: #fdd; }
+    fieldset { border-color: #444; }
+    .toolbar { --bg: #181818; }
+  }
+</style>
+</head>
+<body>
+<h1>Tab5 BLE 設定</h1>
+<p class="hint">
+  Web Bluetooth (Chrome / Edge 133+) から Tab5 の Wi-Fi / SSH / Tailscale を設定します。
+  通信は接続ごとに X25519 + AES-256-GCM で暗号化されます (OS ペアリング不要)。
+  <a href="BLE_CONFIG_DESIGN.md">プロトコルの詳細</a>
+</p>
+
+<div class="toolbar row">
+  <span><span id="ble-dot" class="dot"></span><span id="ble-label">未接続</span></span>
+  <button id="btn-connect" class="primary">接続</button>
+  <button id="btn-disconnect" disabled>切断</button>
+</div>
+
+<fieldset>
+  <legend>状態 (NOTIFY)</legend>
+  <div class="status-row">
+    <span><span id="st-wifi" class="dot"></span>Wi-Fi</span>
+    <span><span id="st-ts"   class="dot"></span>Tailscale</span>
+    <span><span id="st-ssh"  class="dot"></span>SSH</span>
+  </div>
+</fieldset>
+
+<h2>Wi-Fi</h2>
+<fieldset>
+  <label for="wifi-ssid">SSID</label>
+  <input type="text" id="wifi-ssid" maxlength="32" autocomplete="off">
+  <label for="wifi-psk">PSK</label>
+  <input type="password" id="wifi-psk" maxlength="63" autocomplete="off"
+         placeholder="(変更しない場合は空欄)">
+  <div style="margin-top:0.6rem" class="row">
+    <button id="btn-wifi-write">Wi-Fi を書き込む</button>
+  </div>
+</fieldset>
+
+<h2>Tailscale</h2>
+<fieldset>
+  <label for="ts-host">ホスト名 (任意)</label>
+  <input type="text" id="ts-host" maxlength="32" autocomplete="off"
+         placeholder="my-tab5">
+  <label for="ts-auth">Auth Key</label>
+  <input type="password" id="ts-auth" maxlength="256" autocomplete="off"
+         placeholder="tskey-auth-… (変更しない場合は空欄)">
+  <div style="margin-top:0.6rem" class="row">
+    <button id="btn-ts-write">Tailscale を書き込む</button>
+  </div>
+</fieldset>
+
+<h2>SSH (プロファイル #0)</h2>
+<fieldset>
+  <label for="ssh-host">ホスト</label>
+  <input type="text" id="ssh-host" maxlength="64" autocomplete="off">
+  <label for="ssh-port">ポート</label>
+  <input type="number" id="ssh-port" min="1" max="65535" value="22">
+  <label for="ssh-user">ユーザー</label>
+  <input type="text" id="ssh-user" maxlength="32" autocomplete="off">
+  <label for="ssh-pw">パスワード</label>
+  <input type="password" id="ssh-pw" maxlength="64" autocomplete="off"
+         placeholder="(変更しない場合は空欄)">
+  <div style="margin-top:0.6rem" class="row">
+    <button id="btn-ssh-write">SSH を書き込む</button>
+  </div>
+</fieldset>
+
+<h2>BLE 認証パスワード</h2>
+<fieldset>
+  <label for="auth-pw">パスワード (空文字でクリア)</label>
+  <input type="password" id="auth-pw" maxlength="64" autocomplete="off">
+  <div style="margin-top:0.6rem" class="row">
+    <button id="btn-auth-write">設定</button>
+    <button id="btn-auth-clear" class="danger">クリア</button>
+  </div>
+  <p class="hint">
+    設定すると、次のセッションから接続時に SHA-256(パスワード) を HKDF salt に折り込みます。
+    正しいパスワードを知らない端末は AES 鍵が一致せず、全ての暗号化された READ/WRITE が GCM tag mismatch で失敗します。
+  </p>
+</fieldset>
+
+<h2>Apply</h2>
+<fieldset>
+  <p class="hint">
+    全ての書き込みは即座に NVS に反映されます。Apply で再起動して新しい設定で接続します。
+  </p>
+  <button id="btn-apply" class="primary">Apply (再起動)</button>
+</fieldset>
+
+<h2>ログ</h2>
+<div id="log"></div>
+
+<script>
+'use strict';
+
+// --- UUIDs (base b5a50000-9c1b-4f3d-8a2e-1f6c4e9b7d0a) ------------------
+const SVC = 'b5a50000-9c1b-4f3d-8a2e-1f6c4e9b7d0a';
+const CHR = {
+  kx:    'b5a50001-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  ssid:  'b5a50002-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  psk:   'b5a50003-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  tsKey: 'b5a50004-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  tsHost:'b5a50005-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  shost: 'b5a50006-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  sport: 'b5a50007-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  suser: 'b5a50008-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  spass: 'b5a50009-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  authpw:'b5a5000a-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  status:'b5a5000b-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+  apply: 'b5a5000c-9c1b-4f3d-8a2e-1f6c4e9b7d0a',
+};
+
+// --- State --------------------------------------------------------------
+let bleDevice = null, server = null, svc = null;
+const chars = {};  // chr id → BluetoothRemoteGATTCharacteristic
+let aesKey = null;
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+
+// --- Log ---------------------------------------------------------------
+const logEl = document.getElementById('log');
+function log(msg, cls = 'info') {
+  const t = new Date();
+  const ts = `${String(t.getHours()).padStart(2,'0')}:${String(t.getMinutes()).padStart(2,'0')}:${String(t.getSeconds()).padStart(2,'0')}`;
+  const div = document.createElement('div');
+  div.innerHTML = `<span style="color:#888">[${ts}]</span> <span class="${cls}">${msg}</span>`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// --- UI helpers --------------------------------------------------------
+function setBleUi(connected) {
+  document.getElementById('ble-dot').className   = 'dot' + (connected ? ' on' : '');
+  document.getElementById('ble-label').textContent = connected ? '接続中' : '未接続';
+  document.getElementById('btn-connect').disabled    = connected;
+  document.getElementById('btn-disconnect').disabled = !connected;
+}
+
+function updateStatus(view) {
+  // 3-byte struct [wifi, tailscale, ssh]
+  document.getElementById('st-wifi').className = 'dot' + (view.getUint8(0) ? ' on' : '');
+  document.getElementById('st-ts').className   = 'dot' + (view.getUint8(1) ? ' on' : '');
+  document.getElementById('st-ssh').className  = 'dot' + (view.getUint8(2) ? ' on' : '');
+}
+
+// --- Crypto -----------------------------------------------------------
+async function ensureX25519() {
+  try {
+    await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
+  } catch (e) {
+    throw new Error('X25519 非対応のブラウザです (Chrome / Edge 133+ が必要)');
+  }
+}
+
+// Run the application-layer handshake. saltBytes = empty by default; on
+// password-gated devices the caller re-runs with SHA-256(password) as salt.
+async function setupSession(saltBytes = new Uint8Array(0)) {
+  const devicePubRaw = new Uint8Array((await chars.kx.readValue()).buffer);
+  if (devicePubRaw.length !== 32) {
+    throw new Error(`device pubkey length ${devicePubRaw.length} != 32`);
+  }
+  const ourKp = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits']);
+  const devicePub = await crypto.subtle.importKey('raw', devicePubRaw, { name: 'X25519' }, false, []);
+  const sharedBits = await crypto.subtle.deriveBits(
+    { name: 'X25519', public: devicePub }, ourKp.privateKey, 256);
+  const ikm = await crypto.subtle.importKey('raw', sharedBits, { name: 'HKDF' }, false, ['deriveKey']);
+  aesKey = await crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: saltBytes,
+      info: enc.encode('tab5-ble-config-v1') },
+    ikm,
+    { name: 'AES-GCM', length: 256 },
+    false, ['encrypt', 'decrypt']);
+  const ourPubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', ourKp.publicKey));
+  await chars.kx.writeValueWithResponse(ourPubRaw);
+}
+
+// Wire format: [12B nonce][ct + 16B tag].
+async function readEncrypted(chr) {
+  const wire = new Uint8Array((await chr.readValue()).buffer);
+  if (wire.length < 12 + 16) throw new Error('encrypted read too short');
+  const iv = wire.subarray(0, 12);
+  const ct = wire.subarray(12);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
+  return new Uint8Array(pt);
+}
+
+async function writeEncrypted(chr, plain) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, plain));
+  const wire = new Uint8Array(iv.length + ct.length);
+  wire.set(iv, 0);
+  wire.set(ct, iv.length);
+  await chr.writeValueWithResponse(wire);
+}
+
+// --- Password-gate probe ----------------------------------------------
+// After the empty-salt handshake, try an encrypted read. If it fails, the
+// device has an auth password set; prompt the user and re-handshake.
+async function ensureAuthenticated() {
+  try {
+    await readEncrypted(chars.ssid);
+    log('認証 OK (パスワードなし、もしくは保存されたものを再利用)', 'ok');
+    return;
+  } catch (_) { /* fall through */ }
+  log('Status 読み取り失敗 → BLE 認証パスワードが設定されている可能性。', 'info');
+  const pwd = window.prompt('BLE 認証パスワード:');
+  if (!pwd) throw new Error('認証パスワードがキャンセルされました');
+  const salt = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(pwd)));
+  await setupSession(salt);
+  try {
+    await readEncrypted(chars.ssid);
+  } catch (e) {
+    throw new Error('パスワードが違うため接続を中断: ' + e.message);
+  }
+  log('認証 OK (パスワード)', 'ok');
+}
+
+// --- Populate form with current device state ---------------------------
+async function loadCurrent() {
+  try {
+    const ssid = dec.decode(await readEncrypted(chars.ssid));
+    document.getElementById('wifi-ssid').value = ssid;
+  } catch (e) { log('SSID read failed: ' + e.message, 'err'); }
+  try {
+    const host = dec.decode(await readEncrypted(chars.tsHost));
+    document.getElementById('ts-host').value = host;
+  } catch (e) { /* may be empty */ }
+  try {
+    document.getElementById('ssh-host').value = dec.decode(await readEncrypted(chars.shost));
+  } catch (e) {}
+  try {
+    const portBytes = await readEncrypted(chars.sport);
+    if (portBytes.length === 2) {
+      const port = portBytes[0] | (portBytes[1] << 8);
+      document.getElementById('ssh-port').value = port;
+    }
+  } catch (e) {}
+  try {
+    document.getElementById('ssh-user').value = dec.decode(await readEncrypted(chars.suser));
+  } catch (e) {}
+  // Status (plaintext + NOTIFY)
+  try {
+    const st = await chars.status.readValue();
+    updateStatus(st);
+  } catch (e) {}
+}
+
+// --- Connect / disconnect ---------------------------------------------
+async function connect() {
+  await ensureX25519();
+  log('スキャン中…');
+  bleDevice = await navigator.bluetooth.requestDevice({
+    filters: [{ services: [SVC] }],
+    optionalServices: ['device_information'],
+  });
+  log(`選択: ${bleDevice.name || '(no name)'}`);
+  bleDevice.addEventListener('gattserverdisconnected', () => {
+    log('切断', 'err');
+    setBleUi(false);
+    aesKey = null;
+  });
+  server = await bleDevice.gatt.connect();
+  svc = await server.getPrimaryService(SVC);
+  for (const [id, uuid] of Object.entries(CHR)) {
+    try {
+      chars[id] = await svc.getCharacteristic(uuid);
+    } catch (e) {
+      log(`chr ${id} 取得失敗: ${e.message}`, 'err');
+    }
+  }
+  log('GATT discovered, handshake…');
+  await setupSession();
+  await ensureAuthenticated();
+  // Subscribe to Status NOTIFY.
+  if (chars.status) {
+    await chars.status.startNotifications();
+    chars.status.addEventListener('characteristicvaluechanged', (e) => {
+      updateStatus(e.target.value);
+    });
+  }
+  await loadCurrent();
+  setBleUi(true);
+  log('準備完了', 'ok');
+}
+
+async function disconnect() {
+  if (bleDevice && bleDevice.gatt && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+  setBleUi(false);
+  aesKey = null;
+}
+
+// --- Form writers ----------------------------------------------------
+function bytesOf(s) { return enc.encode(s); }
+
+async function writeWifi() {
+  const ssid = document.getElementById('wifi-ssid').value;
+  const psk  = document.getElementById('wifi-psk').value;
+  try {
+    if (ssid)         { await writeEncrypted(chars.ssid, bytesOf(ssid)); log('SSID 書き込み OK', 'ok'); }
+    if (psk.length>0) { await writeEncrypted(chars.psk,  bytesOf(psk));  log('PSK 書き込み OK',  'ok'); }
+  } catch (e) { log('Wi-Fi 書き込み失敗: ' + e.message, 'err'); }
+}
+
+async function writeTailscale() {
+  const host = document.getElementById('ts-host').value;
+  const key  = document.getElementById('ts-auth').value;
+  try {
+    if (host)         { await writeEncrypted(chars.tsHost, bytesOf(host)); log('ts hostname OK', 'ok'); }
+    if (key.length>0) { await writeEncrypted(chars.tsKey,  bytesOf(key));  log('ts auth key OK', 'ok'); }
+  } catch (e) { log('Tailscale 書き込み失敗: ' + e.message, 'err'); }
+}
+
+async function writeSsh() {
+  const host = document.getElementById('ssh-host').value;
+  const port = parseInt(document.getElementById('ssh-port').value, 10);
+  const user = document.getElementById('ssh-user').value;
+  const pw   = document.getElementById('ssh-pw').value;
+  try {
+    if (host) { await writeEncrypted(chars.shost, bytesOf(host)); log('SSH host OK', 'ok'); }
+    if (port >= 1 && port <= 65535) {
+      const p = new Uint8Array(2); p[0] = port & 0xff; p[1] = (port >> 8) & 0xff;
+      await writeEncrypted(chars.sport, p);
+      log('SSH port OK', 'ok');
+    }
+    if (user) { await writeEncrypted(chars.suser, bytesOf(user)); log('SSH user OK', 'ok'); }
+    if (pw.length>0) { await writeEncrypted(chars.spass, bytesOf(pw)); log('SSH password OK', 'ok'); }
+  } catch (e) { log('SSH 書き込み失敗: ' + e.message, 'err'); }
+}
+
+async function writeAuthPassword(clear) {
+  const pwd = clear ? '' : document.getElementById('auth-pw').value;
+  try {
+    await writeEncrypted(chars.authpw, bytesOf(pwd));
+    log(clear ? 'BLE 認証クリア' : 'BLE 認証パスワード設定', 'ok');
+    document.getElementById('auth-pw').value = '';
+  } catch (e) { log('Auth password 書き込み失敗: ' + e.message, 'err'); }
+}
+
+async function doApply() {
+  if (!confirm('Tab5 を再起動します。よろしいですか?')) return;
+  try {
+    await writeEncrypted(chars.apply, new Uint8Array([1]));
+    log('Apply: 再起動を要求しました', 'ok');
+  } catch (e) { log('Apply 失敗: ' + e.message, 'err'); }
+}
+
+// --- Hookup ---------------------------------------------------------
+document.getElementById('btn-connect').addEventListener('click', () => {
+  connect().catch((e) => { log('接続失敗: ' + e.message, 'err'); });
+});
+document.getElementById('btn-disconnect').addEventListener('click', () => { disconnect(); });
+document.getElementById('btn-wifi-write').addEventListener('click', writeWifi);
+document.getElementById('btn-ts-write').addEventListener('click', writeTailscale);
+document.getElementById('btn-ssh-write').addEventListener('click', writeSsh);
+document.getElementById('btn-auth-write').addEventListener('click', () => writeAuthPassword(false));
+document.getElementById('btn-auth-clear').addEventListener('click', () => writeAuthPassword(true));
+document.getElementById('btn-apply').addEventListener('click', doApply);
+
+if (!navigator.bluetooth) {
+  log('Web Bluetooth 非対応のブラウザです (Chrome / Edge / Opera を使用してください)', 'err');
+  document.getElementById('btn-connect').disabled = true;
+}
+</script>
+</body>
+</html>

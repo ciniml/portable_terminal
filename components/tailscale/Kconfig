@@ -2,11 +2,16 @@ menu "Tailscale"
 
     config TAILSCALE_ENABLE
         bool "Enable Tailscale client"
-        default n
+        default y
         select WIREGUARD_ENABLE
         help
             Enable the Tailscale client.  The device will join the Tailscale
             network after WiFi connects, using the WireGuard data plane.
+
+            Empty auth key at boot simply skips registration so it's safe
+            to leave on by default; provision the auth_key (NVS key
+            "auth_key" in namespace "tailscale") later via BLE or by
+            rebuilding with CONFIG_TAILSCALE_AUTH_KEY set.
 
     config TAILSCALE_AUTH_KEY
         string "Pre-auth key (tskey-auth-...)"

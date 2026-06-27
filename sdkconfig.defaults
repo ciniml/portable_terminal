@@ -10,17 +10,13 @@ CONFIG_PARTITION_TABLE_SINGLE_APP=n
 # Bootloader rollback
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# Reusable VPN/USB components are present in components/ but unused in Phase 1.
-# Disable Tailscale to avoid pulling in TLS/lwIP tuning until Phase 3+.
-CONFIG_TAILSCALE_ENABLE=n
-
-# Route Tailscale peer traffic through the DERP relay rather than the
-# advertised direct UDP endpoint. The simplified data plane has no
-# DISCO-driven direct-path negotiation / fallback, so a fixed direct
-# endpoint that doesn't work (NAT, hairpin, expired mapping) leaves the
-# peer permanently unreachable. DERP reaches the peer by public key via
-# the relay mesh and works from any network. Slower but reliable.
-CONFIG_TAILSCALE_DERP_ONLY=y
+# Tailscale on by default. The DISCO + multi-probe + pubip + outbound
+# CallMeMaybe paths added in Phase 7 step 8..11 give us a working direct
+# UDP path on MAP-E home networks with DERP as the always-available
+# fallback. Auth key is empty by default — tailscale_esp32 logs and skips
+# registration until one is provisioned (BLE / NVS / Kconfig).
+CONFIG_TAILSCALE_ENABLE=y
+CONFIG_TAILSCALE_DERP_ONLY=n
 
 # C++ exceptions off (default), but enable RTTI for std::expected helpers
 # if needed by future code. Keep size optimization for OTA partitions.
@@ -38,10 +34,10 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # FTDI USB-Serial host driver (used by UsbSerialConnection).
 CONFIG_USB_HOST_ENABLE_FTDI_SIO_DRIVER=y
 
-# WireGuard VPN is opt-in — empty keys make wireguard_esp32_start fail
-# loud, so default off and let the user enable in sdkconfig.defaults.local
-# once they have a peer to connect to.
-CONFIG_WIREGUARD_ENABLE=n
+# WireGuard is implicitly on via TAILSCALE_ENABLE → select WIREGUARD_ENABLE.
+# Standalone WireGuard (without Tailscale) is still opt-in: set
+# CONFIG_TAILSCALE_ENABLE=n + CONFIG_WIREGUARD_ENABLE=y in your
+# sdkconfig.defaults.local to bring up a hand-configured peer.
 
 # Tailscale fans every tailnet peer into a separate WireGuard peer.
 # The WG default is 1 peer; raise to 16 so a typical tailnet fits

@@ -132,6 +132,15 @@ Key options:
 | `CONFIG_TAILSCALE_AUTH_KEY` | Tailscale auth key (`tskey-auth-…`) |
 | `CONFIG_TAILSCALE_HOSTNAME` | Hostname advertised to the tailnet |
 | `CONFIG_TAILSCALE_LISTEN_PORT` | WireGuard UDP listen port (default 41641) |
+| `CONFIG_TAB5_BLE_CONFIG_ENABLED` | BLE provisioning service (β; see below) |
+
+A BLE-based provisioning service (β) is also available — enable with
+`CONFIG_TAB5_BLE_CONFIG_ENABLED=y` and use the Web Bluetooth UI at
+`docs/settings.html` (Chrome / Edge 133+) to set Wi-Fi / SSH / Tailscale
+credentials at runtime without rebuilding. Requires a C6 slave firmware
+built with BT controller support. See
+[`docs/BLE_CONFIG_DESIGN.md`](docs/BLE_CONFIG_DESIGN.md) for the protocol
+and threat model.
 
 For SSH public-key authentication:
 

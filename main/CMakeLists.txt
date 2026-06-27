@@ -67,6 +67,10 @@ idf_component_register(
         wireguard
         tailscale
         usb_host_ftdi_sio
+        # BLE provisioning is gated on CONFIG_TAB5_BLE_CONFIG_ENABLED — the
+        # component registers empty when disabled so this require is always
+        # safe to list.
+        ble_config_service
     EMBED_TXTFILES ${_embed_txtfiles}
 )
 target_compile_features(${COMPONENT_LIB} PRIVATE cxx_std_23)

@@ -43,6 +43,9 @@
 #include "vpn.hpp"
 #include "connection.hpp"
 #include "profiles.hpp"
+#if CONFIG_TAB5_BLE_CONFIG_ENABLED
+#include "ble_config/ble_config.hpp"
+#endif
 #include "reconnect.hpp"
 #if CONFIG_TAB5_SSH_ENABLED
 #include "ssh_connection.hpp"
@@ -421,6 +424,21 @@ extern "C" void app_main(void) {
     // boot task after UI / status panel / touch are up so the user
     // sees the progress and can [Cancel].
     tab5::wifi_config::init();
+#endif
+
+#if CONFIG_TAB5_BLE_CONFIG_ENABLED
+    // BLE provisioning service. Non-fatal — if the C6 slave firmware
+    // wasn't built with BT controller support, nimble_port_init fails
+    // and we log a warning. Profiles must be initialised first because
+    // the GATT service snapshots the active profile on init() for the
+    // encrypted-READ snapshot.
+    tab5::profiles.init();
+    if (auto rc = tab5::ble_config::start(); !rc) {
+        ESP_LOGW(kTag, "BLE config service start failed (error=%d)",
+                 static_cast<int>(rc.error()));
+    } else {
+        ESP_LOGI(kTag, "BLE config service ready — pair from settings.html");
+    }
 #endif
 
     const esp_timer_create_args_t blink_args = {

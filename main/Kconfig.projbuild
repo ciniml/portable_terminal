@@ -106,12 +106,18 @@ menu "Tab5 terminal"
 
         config TAB5_WIFI_ENABLED
             bool "Enable Wi-Fi station"
-            default n
+            default y
             help
                 When enabled, the app brings up the ESP32-C6 Wi-Fi
                 co-processor and joins the AP configured below.
                 Requires the matching C6 firmware to be flashed
                 (see wifi_c6_fw/ in M5Tab5-UserDemo).
+
+                With an empty SSID at boot the Wi-Fi task simply
+                logs "no credentials" and the device stays usable
+                as a local terminal — so it's safe to leave on by
+                default and configure credentials later via NVS
+                or BLE provisioning.
 
         config TAB5_WIFI_SSID
             string "SSID"
@@ -164,13 +170,17 @@ menu "Tab5 terminal"
 
         config TAB5_SSH_ENABLED
             bool "Enable SSH client"
-            default n
+            default y
             depends on TAB5_WIFI_ENABLED
             help
                 When enabled and Wi-Fi has come up, the app opens an
                 SSH shell session to the configured server, renders
                 the remote pty on the LCD, and forwards locally-typed
                 bytes (USB-Serial-JTAG + UART) to the remote.
+
+                Empty host at boot just skips the SSH start, so it's
+                safe to enable by default and provision later via NVS
+                or BLE.
 
         config TAB5_SSH_HOST
             string "Server host"
