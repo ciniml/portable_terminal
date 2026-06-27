@@ -565,6 +565,17 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
             wireguard_esp32_update_endpoint(s_peers[slot].wg_index,
                                             &ep_ip, ep_port);
         }
+        /* Retry CallMeMaybe — endpoints may have become available since
+         * we first added this peer (STUN / pubip completes after netmap).
+         * Rate-limit inside the sender prevents flooding. */
+        bool disco_set = false;
+        for (int b = 0; b < 32; b++)
+            if (p->disco_pub[b]) { disco_set = true; break; }
+        if (disco_set && p->derp_region > 0) {
+            ts_disco_send_call_me_maybe(s_peers[slot].wg_index,
+                                         p->node_pub, p->disco_pub,
+                                         (uint8_t)p->derp_region);
+        }
         return;
     }
 
@@ -624,6 +635,19 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
             ts_disco_send_ping(wg_idx, p->node_pub, p->disco_pub,
                                &p->cands[i].ip, p->cands[i].port);
         }
+    }
+
+    /* Also send CallMeMaybe via DERP, advertising OUR endpoints, so the
+     * peer can ping back at us. This is what unsticks peers behind hostile
+     * NATs whose advertised endpoints we can never reach directly: once
+     * they DISCO-Ping us at our published endpoint, our Pong responder
+     * promotes the path on their side, NAT pinhole opens, and our own
+     * outbound DISCO Pings (above) finally get a Pong back.
+     * Rate-limited inside ts_disco_send_call_me_maybe; verified peers
+     * skipped; silently skipped when we have no endpoints yet. */
+    if (disco_set && p->derp_region > 0) {
+        ts_disco_send_call_me_maybe(wg_idx, p->node_pub, p->disco_pub,
+                                     (uint8_t)p->derp_region);
     }
 }
 
@@ -830,5 +854,20 @@ bool ts_netmap_resolve(const char *name, char *ip_str, size_t ip_str_len)
     }
     // Also recognise "self" / our own hostname → 100.x assigned to us.
     // (Useful for ssh-ing back to the Tab5 itself for testing.)
+    return false;
+}
+
+bool ts_netmap_lookup_by_disco(const uint8_t disco_pub[32],
+                                uint8_t *wg_idx_out,
+                                uint8_t  node_pub_out[32])
+{
+    if (!disco_pub) return false;
+    for (int i = 0; i < TS_NETMAP_MAX_PEERS; i++) {
+        if (!s_peers[i].active) continue;
+        if (memcmp(s_peers[i].disco_pub, disco_pub, 32) != 0) continue;
+        if (wg_idx_out)   *wg_idx_out = s_peers[i].wg_index;
+        if (node_pub_out) memcpy(node_pub_out, s_peers[i].node_pub, 32);
+        return true;
+    }
     return false;
 }

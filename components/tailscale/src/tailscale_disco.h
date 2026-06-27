@@ -43,9 +43,10 @@
 extern "C" {
 #endif
 
-/* DISCO message types (subset we implement — Ping/Pong only). */
-#define DISCO_MSG_PING  0x01
-#define DISCO_MSG_PONG  0x02
+/* DISCO message types (subset we implement). */
+#define DISCO_MSG_PING           0x01
+#define DISCO_MSG_PONG           0x02
+#define DISCO_MSG_CALL_ME_MAYBE  0x03
 
 /**
  * @brief Initialise DISCO state and register the WG dispatch callback.
@@ -87,6 +88,31 @@ esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
                              const uint8_t peer_node_pub[32],
                              const uint8_t peer_disco_pub[32],
                              const ip_addr_t *cand_ip, uint16_t cand_port);
+
+/**
+ * @brief Send a CallMeMaybe to a peer via DERP, advertising our endpoints.
+ *
+ * Tells the peer "ping me at these published addresses". The peer's
+ * official client receives, sends DISCO Pings to those endpoints, our
+ * DISCO Pong responder replies, the peer learns a verified direct
+ * endpoint for us, and the peer's outbound NAT pinhole opens — at
+ * which point the peer can DISCO-Pong our outbound Pings and we
+ * promote it to direct in both directions.
+ *
+ * Rate-limited to at most one CallMeMaybe per peer per 30 s.
+ * Already-direct (verified) peers are skipped.
+ * Silently skipped if we have no endpoints to advertise yet.
+ *
+ * @param wg_peer_index     WireGuard peer index (rate-limit/verified key).
+ * @param peer_node_pub     Peer's NodeKey (DERP delivery routing).
+ * @param peer_disco_pub    Peer's DISCO Curve25519 public key.
+ * @param peer_derp_region  Peer's home DERP region (carried in netmap).
+ * @return ESP_OK on send, ESP_OK silently on rate-limit / no-endpoints / verified.
+ */
+esp_err_t ts_disco_send_call_me_maybe(uint8_t wg_peer_index,
+                                       const uint8_t peer_node_pub[32],
+                                       const uint8_t peer_disco_pub[32],
+                                       uint8_t peer_derp_region);
 
 #ifdef __cplusplus
 }

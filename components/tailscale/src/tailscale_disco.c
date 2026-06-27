@@ -17,15 +17,20 @@
  */
 
 #include "tailscale_disco.h"
+#include "tailscale_control.h"
+#include "tailscale_derp.h"
 #include "tailscale_nacl.h"
+#include "tailscale_netmap.h"
 
 #include "wireguard_esp32.h"
 #include "crypto.h"  /* wireguard_x25519, wireguard_random_bytes */
 
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "lwip/inet.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static const char *TAG = "ts_disco";
@@ -74,6 +79,12 @@ static pending_ping_t  s_pending[DISCO_PENDING_MAX];
  * unreachable interfaces. Cleared when the peer is removed from the
  * netmap (or, conservatively, never — re-init zeros it). */
 static bool            s_verified[DISCO_VERIFIED_MAX];
+
+/* Rate-limit: at most one outbound CallMeMaybe per WG peer per 30 s.
+ * Indexed by wg_peer_index. esp_timer_get_time() is microseconds since boot. */
+#define DISCO_PEERS_MAX                16
+#define DISCO_CALL_ME_MAYBE_INTERVAL_US (30LL * 1000LL * 1000LL)
+static int64_t         s_last_call_me_maybe_ts[DISCO_PEERS_MAX];
 
 /* Forward decl — registered with wireguardif as the DISCO input callback. */
 static void ts_disco_rx(const uint8_t *data, size_t len,
@@ -172,6 +183,7 @@ esp_err_t ts_disco_init(const uint8_t disco_priv[32],
     memcpy(s_node_pub,   node_pub,   32);
     memset(s_pending,    0, sizeof(s_pending));
     memset(s_verified,   0, sizeof(s_verified));
+    memset(s_last_call_me_maybe_ts, 0, sizeof(s_last_call_me_maybe_ts));
     s_inited = true;
 
     wireguard_esp32_set_disco_input(ts_disco_rx);
@@ -231,6 +243,111 @@ esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
              (unsigned)((ip_2_ip4(cand_ip)->addr >> 24) & 0xFF),
              (unsigned)cand_port,
              tx_id_field[0], tx_id_field[1], tx_id_field[2], tx_id_field[3]);
+    return ESP_OK;
+}
+
+/* Pack one "a.b.c.d:port" endpoint string as an 18-byte AddrPort record:
+ * IPv4-mapped IPv6 (10 zero bytes, 0xFF, 0xFF, then 4 bytes IPv4 in network
+ * order), followed by 2 bytes of port in big-endian. Returns true on parse. */
+static bool pack_addrport_v4(const char *ep_str, uint8_t out[18])
+{
+    const char *colon = strrchr(ep_str, ':');
+    if (!colon) return false;
+    char ip_buf[40];
+    size_t ip_len = (size_t)(colon - ep_str);
+    if (ip_len == 0 || ip_len >= sizeof(ip_buf)) return false;
+    memcpy(ip_buf, ep_str, ip_len);
+    ip_buf[ip_len] = '\0';
+
+    ip4_addr_t v4;
+    if (!ip4addr_aton(ip_buf, &v4)) return false;
+    int port = atoi(colon + 1);
+    if (port <= 0 || port > 65535) return false;
+
+    memset(out, 0, 10);
+    out[10] = 0xFF;
+    out[11] = 0xFF;
+    memcpy(out + 12, &v4.addr, 4);    /* network byte order */
+    out[16] = (uint8_t)((port >> 8) & 0xFF);
+    out[17] = (uint8_t)(port & 0xFF);
+    return true;
+}
+
+esp_err_t ts_disco_send_call_me_maybe(uint8_t wg_peer_index,
+                                       const uint8_t peer_node_pub[32],
+                                       const uint8_t peer_disco_pub[32],
+                                       uint8_t peer_derp_region)
+{
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    if (!peer_node_pub || !peer_disco_pub) return ESP_ERR_INVALID_ARG;
+    if (peer_derp_region == 0) return ESP_ERR_INVALID_ARG;
+
+    /* Skip peers we've already verified as direct — no point in
+     * inviting more reverse Pings to a path that's already up. */
+    if (wg_peer_index < DISCO_VERIFIED_MAX && s_verified[wg_peer_index]) {
+        return ESP_OK;
+    }
+
+    /* Rate limit. */
+    int64_t now = esp_timer_get_time();
+    if (wg_peer_index < DISCO_PEERS_MAX) {
+        int64_t last = s_last_call_me_maybe_ts[wg_peer_index];
+        if (last != 0 && (now - last) < DISCO_CALL_ME_MAYBE_INTERVAL_US) {
+            return ESP_OK;
+        }
+    }
+
+    /* Snapshot the endpoints we've advertised to the control server.
+     * If we haven't any yet (STUN / pubip discovery still in progress),
+     * silently skip — the next netmap_apply tick will retry. */
+    char eps[CTRL_MAX_ENDPOINTS][CTRL_MAX_EP_LEN];
+    int n_eps = ts_ctrl_get_endpoints(eps, CTRL_MAX_ENDPOINTS);
+    if (n_eps <= 0) {
+        ESP_LOGI(TAG, "call_me_maybe: skip peer %u — no endpoints to advertise",
+                 wg_peer_index);
+        return ESP_OK;
+    }
+
+    /* Build inner plaintext: [type=CallMeMaybe][ver=0] || AddrPort * N. */
+    uint8_t inner[DISCO_INNER_HDR_LEN + 18 * CTRL_MAX_ENDPOINTS];
+    inner[0] = DISCO_MSG_CALL_ME_MAYBE;
+    inner[1] = 0;
+    int packed = 0;
+    for (int i = 0; i < n_eps; i++) {
+        if (eps[i][0] == '\0') continue;
+        if (pack_addrport_v4(eps[i], inner + DISCO_INNER_HDR_LEN + packed * 18)) {
+            packed++;
+        }
+    }
+    if (packed == 0) {
+        ESP_LOGI(TAG, "call_me_maybe: skip peer %u — no parseable endpoints",
+                 wg_peer_index);
+        return ESP_OK;
+    }
+    size_t inner_len = DISCO_INNER_HDR_LEN + (size_t)packed * 18;
+
+    uint8_t frame[DISCO_HEADER_LEN + DISCO_TAG_LEN +
+                  DISCO_INNER_HDR_LEN + 18 * CTRL_MAX_ENDPOINTS];
+    size_t  frame_len = 0;
+    esp_err_t err = build_disco_frame(peer_disco_pub, inner, inner_len,
+                                      frame, sizeof(frame), &frame_len);
+    if (err != ESP_OK) return err;
+
+    /* Send via DERP — the whole point of CallMeMaybe is that we don't
+     * yet have a direct UDP path to the peer. */
+    err = ts_derp_send((int)peer_derp_region, peer_node_pub,
+                       frame, frame_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "CallMeMaybe ts_derp_send peer=%u region=%u -> %d",
+                 wg_peer_index, peer_derp_region, (int)err);
+        return err;
+    }
+
+    if (wg_peer_index < DISCO_PEERS_MAX) {
+        s_last_call_me_maybe_ts[wg_peer_index] = now;
+    }
+    ESP_LOGI(TAG, "CallMeMaybe sent peer=%u to derp=%u with %d eps",
+             wg_peer_index, peer_derp_region, packed);
     return ESP_OK;
 }
 
@@ -348,6 +465,49 @@ static void ts_disco_rx(const uint8_t *data, size_t len,
                  (unsigned)((ip_2_ip4(src_ip)->addr >> 24) & 0xFF),
                  (unsigned)src_port, wg_idx);
         wireguard_esp32_update_endpoint(wg_idx, src_ip, src_port);
+        break;
+    }
+    case DISCO_MSG_CALL_ME_MAYBE: {
+        /* Body: zero or more 18-byte AddrPort records (IPv6[16] + Port[2 BE]).
+         * Semantics: "I'm sender. Ping me at any of these addresses now." */
+        const uint8_t *body     = pt + DISCO_INNER_HDR_LEN;
+        size_t         body_len = (size_t)pt_len - DISCO_INNER_HDR_LEN;
+        if (body_len % 18 != 0) {
+            ESP_LOGW(TAG, "CallMeMaybe: ragged body %u B", (unsigned)body_len);
+            return;
+        }
+        uint8_t wg_idx;
+        uint8_t peer_node_pub[32];
+        if (!ts_netmap_lookup_by_disco(sender_pub, &wg_idx, peer_node_pub)) {
+            ESP_LOGD(TAG, "CallMeMaybe: unknown sender");
+            return;
+        }
+        int n = (int)(body_len / 18);
+        ESP_LOGI(TAG, "CallMeMaybe from peer %u with %d addrs", wg_idx, n);
+        for (int i = 0; i < n; i++) {
+            const uint8_t *rec = body + i * 18;
+            /* Tab5 has no IPv6 — accept only v4-mapped (::ffff:a.b.c.d). */
+            bool v4mapped = true;
+            for (int j = 0; j < 10; j++) {
+                if (rec[j]) { v4mapped = false; break; }
+            }
+            if (v4mapped && (rec[10] != 0xFF || rec[11] != 0xFF)) {
+                v4mapped = false;
+            }
+            if (!v4mapped) continue;
+            uint32_t addr_be;
+            memcpy(&addr_be, rec + 12, 4);
+            uint16_t port = ((uint16_t)rec[16] << 8) | rec[17];
+            uint32_t a_h = ntohl(addr_be);
+            if (port == 0 || a_h == 0)                continue;
+            if ((a_h & 0xFF000000) == 0x7F000000)     continue;  /* 127/8 */
+            if ((a_h & 0xF0000000) == 0xE0000000)     continue;  /* 224/4 */
+            ip4_addr_t v4;
+            ip4_addr_set_u32(&v4, addr_be);
+            ip_addr_t ip;
+            ip_addr_copy_from_ip4(ip, v4);
+            ts_disco_send_ping(wg_idx, peer_node_pub, sender_pub, &ip, port);
+        }
         break;
     }
     default:

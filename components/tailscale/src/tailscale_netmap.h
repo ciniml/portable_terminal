@@ -70,3 +70,18 @@ bool ts_netmap_resolve(const char *name, char *ip_str, size_t ip_str_len);
  * @return true if the region is known, false otherwise.
  */
 bool ts_netmap_get_derp_region(int region_id, ts_derp_node_t *out);
+
+/**
+ * @brief Look up a peer by its DISCO public key.
+ *
+ * Used by the CallMeMaybe handler to resolve a sender's identity to the
+ * WireGuard peer slot we should target with follow-up DISCO Pings.
+ *
+ * @param disco_pub      32-byte DISCO Curve25519 public key to match.
+ * @param wg_idx_out     On hit, receives the WG peer index.
+ * @param node_pub_out   On hit, receives the peer's 32-byte NodeKey.
+ * @return true on hit, false on miss.
+ */
+bool ts_netmap_lookup_by_disco(const uint8_t disco_pub[32],
+                                uint8_t *wg_idx_out,
+                                uint8_t  node_pub_out[32]);

@@ -6,7 +6,9 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "esp_err.h"
+#include "lwip/ip_addr.h"
 
 /* DERP frame types (https://pkg.go.dev/tailscale.com/derp) */
 #define DERP_FRAME_SERVER_KEY      0x01

@@ -11,6 +11,7 @@
 #include "tailscale_netmap.h"
 #include "tailscale_derp.h"
 #include "tailscale_disco.h"
+#include "tailscale_pubip.h"
 
 #include "wireguard_esp32.h"
 
@@ -20,6 +21,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char *TAG = "tailscale";
@@ -80,6 +82,25 @@ done:
 }
 
 /* ------------------------------------------------------------------ */
+/* Pubip result → MapRequest.Endpoints                                  */
+/* ------------------------------------------------------------------ */
+
+static void pubip_result_cb(uint32_t ip_be, uint16_t port)
+{
+    char buf[CTRL_MAX_EP_LEN];
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
+             (unsigned)((ip_be      ) & 0xFF),
+             (unsigned)((ip_be >>  8) & 0xFF),
+             (unsigned)((ip_be >> 16) & 0xFF),
+             (unsigned)((ip_be >> 24) & 0xFF),
+             (unsigned)port);
+    const char *eps[1] = { buf };
+    ts_ctrl_set_endpoints(eps, 1);
+    ts_ctrl_signal_endpoints_dirty();
+    ESP_LOGI(TAG, "Public endpoint: %s", buf);
+}
+
+/* ------------------------------------------------------------------ */
 /* Control-plane task                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -121,6 +142,23 @@ static void ctrl_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "Updated MapRequest failed (%s)",
                          esp_err_to_name(err));
+            }
+        }
+
+        /* Public-IP probe via HTTPS — replaces UDP STUN, which the user's
+         * MAP-E upstream (v6プラス / BBIX フルマップ) doesn't return
+         * BindingResponses through. Pubip uses TCP 443 which is unaffected.
+         * The discovered (ip, port=WG_listen) endpoint is published via
+         * MapRequest.Endpoints so peers can CallMeMaybe us, then our DISCO
+         * receiver pings them back to open the NAT pinhole. */
+        if (have_derp) {
+            static bool pubip_inited = false;
+            if (!pubip_inited) {
+                if (ts_pubip_init(pubip_result_cb) == ESP_OK) {
+                    pubip_inited = true;
+                }
+            } else {
+                ts_pubip_kick();
             }
         }
 
@@ -211,6 +249,10 @@ esp_err_t tailscale_esp32_stop(void)
     if (!s_started) return ESP_OK;
 
     ts_ctrl_stop(&s_ctrl_ctx);
+    /* Tear down the pubip probe task before everything else; its HTTP
+     * client doesn't share state with WG but ordering keeps shutdown
+     * predictable. */
+    ts_pubip_deinit();
     ts_derp_disconnect();
     /* DISCO has no task/socket of its own; unregister the dispatcher so
      * a future tailscale_esp32_start() can re-init safely. */

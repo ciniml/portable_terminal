@@ -80,3 +80,42 @@ void ts_ctrl_stop(ts_ctrl_ctx_t *ctx);
  * and is only valid until the next ts_ctrl_register() call.
  */
 const char *ts_ctrl_get_auth_url(void);
+
+/* Maximum length of a single endpoint string ("a.b.c.d:port" plus NUL). */
+#define CTRL_MAX_EP_LEN     48
+/* Maximum number of endpoints we publish in MapRequest.Endpoints. */
+#define CTRL_MAX_ENDPOINTS  4
+
+/**
+ * @brief Replace the published Endpoints list.
+ *
+ * Strings of the form "a.b.c.d:port" (or "[v6]:port"), copied into
+ * module-local storage so the caller may free its strings after return.
+ * Caller should also call ts_ctrl_signal_endpoints_dirty() to request a
+ * MapRequest re-issuance on the next poll-loop iteration.
+ *
+ * @param eps  Array of NUL-terminated endpoint strings.
+ * @param n    Number of entries (clamped to CTRL_MAX_ENDPOINTS).
+ */
+void ts_ctrl_set_endpoints(const char *const *eps, int n);
+
+/**
+ * @brief Notify the poll loop that endpoints changed.
+ *
+ * Best-effort: the long-poll loop checks the dirty flag after each
+ * MapResponse segment. If it's blocked on map_read_one, the update
+ * lands on the next segment arrival or reconnect.
+ */
+void ts_ctrl_signal_endpoints_dirty(void);
+
+/**
+ * @brief Snapshot the currently-published Endpoints into the caller buffer.
+ *
+ * Strings are "a.b.c.d:port" format, NUL-terminated. Returns the count
+ * written, which is min(max, the current set's size) and 0..CTRL_MAX_ENDPOINTS.
+ *
+ * @param out  Destination buffer; entries are CTRL_MAX_EP_LEN bytes each.
+ * @param max  Maximum number of entries the caller can accept.
+ * @return Number of endpoint strings written.
+ */
+int ts_ctrl_get_endpoints(char out[][CTRL_MAX_EP_LEN], int max);

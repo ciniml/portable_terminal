@@ -8,6 +8,7 @@ if(CONFIG_TAILSCALE_ENABLE)
             "src/tailscale_netmap.c"
             "src/tailscale_derp.c"
             "src/tailscale_disco.c"
+            "src/tailscale_pubip.c"
             "src/tailscale_jstream.c"
             "src/tailscale_nacl.c"
         INCLUDE_DIRS
@@ -23,7 +24,9 @@ if(CONFIG_TAILSCALE_ENABLE)
             nvs_flash
             espressif__cjson
             esp_system
+            esp_timer
             mbedtls
+            esp_http_client
     )
 
     # Explicitly pull in include paths that may not propagate in MINIMAL_BUILD.
@@ -35,7 +38,11 @@ if(CONFIG_TAILSCALE_ENABLE)
     idf_component_get_property(esp_partition_dir esp_partition    COMPONENT_DIR)
     idf_component_get_property(esp_netif_dir     esp_netif        COMPONENT_DIR)
     idf_component_get_property(esp_blockdev_dir  esp_blockdev     COMPONENT_DIR)
+    idf_component_get_property(esp_http_client_dir esp_http_client COMPONENT_DIR)
+    idf_component_get_property(esp_event_dir       esp_event       COMPONENT_DIR)
+    idf_component_get_property(esp_timer_dir       esp_timer       COMPONENT_DIR)
     target_include_directories(${COMPONENT_LIB} PRIVATE
+        ${esp_timer_dir}/include
         ${esp_tls_dir}
         ${mbedtls_dir}/mbedtls/include
         ${mbedtls_dir}/mbedtls/tf-psa-crypto/include
@@ -50,6 +57,8 @@ if(CONFIG_TAILSCALE_ENABLE)
         ${esp_partition_dir}/include
         ${esp_blockdev_dir}/include
         ${esp_netif_dir}/include
+        ${esp_http_client_dir}/include
+        ${esp_event_dir}/include
     )
 
     # Ensure wireguard crypto symbols are not dropped by --gc-sections.

@@ -59,6 +59,45 @@ const char *ts_ctrl_get_auth_url(void)
     return s_auth_url;
 }
 
+/* Endpoints published in MapRequest.Endpoints. Populated by the pubip
+ * probe via ts_ctrl_set_endpoints(); re-sent on the next poll-loop
+ * iteration when s_endpoints_dirty is set. The dirty flag is a plain
+ * volatile bool — single-byte loads/stores need no mutex. */
+static char          s_endpoints[CTRL_MAX_ENDPOINTS][CTRL_MAX_EP_LEN];
+static int           s_endpoint_count = 0;
+static volatile bool s_endpoints_dirty = false;
+
+void ts_ctrl_set_endpoints(const char *const *eps, int n)
+{
+    if (n < 0) n = 0;
+    if (n > CTRL_MAX_ENDPOINTS) n = CTRL_MAX_ENDPOINTS;
+    for (int i = 0; i < n; i++) {
+        if (eps && eps[i]) {
+            strlcpy(s_endpoints[i], eps[i], CTRL_MAX_EP_LEN);
+        } else {
+            s_endpoints[i][0] = '\0';
+        }
+    }
+    s_endpoint_count = n;
+}
+
+void ts_ctrl_signal_endpoints_dirty(void)
+{
+    s_endpoints_dirty = true;
+}
+
+int ts_ctrl_get_endpoints(char out[][CTRL_MAX_EP_LEN], int max)
+{
+    if (!out || max <= 0) return 0;
+    int n = s_endpoint_count;
+    if (n > max) n = max;
+    if (n > CTRL_MAX_ENDPOINTS) n = CTRL_MAX_ENDPOINTS;
+    for (int i = 0; i < n; i++) {
+        strlcpy(out[i], s_endpoints[i], CTRL_MAX_EP_LEN);
+    }
+    return n;
+}
+
 static int tls_write(const uint8_t *buf, size_t len)
 {
     size_t written = 0;
@@ -967,6 +1006,19 @@ esp_err_t ts_ctrl_map_request(ts_ctrl_ctx_t *ctx)
 
     cJSON_AddItemToObject(root, "Hostinfo", hi);
 
+    /* Pubip-discovered (or otherwise published) UDP endpoints we advertise
+     * to peers. Empty when the probe hasn't completed yet — coordinator will
+     * still emit MapResponse and we re-issue this MapRequest once a result
+     * lands. */
+    cJSON *eps = cJSON_CreateArray();
+    for (int i = 0; i < s_endpoint_count; i++) {
+        if (s_endpoints[i][0]) {
+            cJSON_AddItemToArray(eps, cJSON_CreateString(s_endpoints[i]));
+        }
+    }
+    cJSON_AddItemToObject(root, "Endpoints", eps);
+    s_endpoints_dirty = false;
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json_str) return ESP_ERR_NO_MEM;
@@ -1086,6 +1138,17 @@ void ts_ctrl_poll_loop(ts_ctrl_ctx_t *ctx)
         if (ts_netmap_get_derp_home(&derp_home)) {
             ts_derp_set_home(&derp_home,
                              ctx->keys->node_priv, ctx->keys->node_pub);
+        }
+
+        /* Pubip (or other endpoint source) signalled a change while we
+         * were blocked on the long-poll. Re-issue MapRequest so peers
+         * see the new Endpoints. */
+        if (s_endpoints_dirty) {
+            esp_err_t merr = ts_ctrl_map_request(ctx);
+            if (merr != ESP_OK) {
+                ESP_LOGW(TAG, "Endpoint MapRequest re-issue failed (%s)",
+                         esp_err_to_name(merr));
+            }
         }
     }
 }
