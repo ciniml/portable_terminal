@@ -112,9 +112,18 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
+          # c6_fw isn't in flash_args (esptool refuses C6 binaries on a
+          # P4 host without --force, so we keep it off the main flash
+          # target) — splice it in here via --extra so the single-file
+          # release firmware.bin still pre-loads the c6_fw partition.
+          EXTRA=()
+          if [ -f build/c6_fw.bin ]; then
+              EXTRA+=(--extra "0x710000:build/c6_fw.bin")
+          fi
           python3 script/pack_firmware.py \
             --build-dir build \
-            --out "firmware-${VERSION}.bin"
+            --out "firmware-${VERSION}.bin" \
+            "${EXTRA[@]}"
           ls -lh "firmware-${VERSION}.bin"
 
       - name: Stage release artifacts

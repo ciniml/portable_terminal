@@ -54,6 +54,43 @@ ln -s ../managed_components/espressif__esp_hosted/slave/build/network_adapter.bi
     slave_c6_fw/network_adapter.bin
 ```
 
+## 手動で `c6_fw` パーティションを書き込む
+
+`make flash` から `c6_fw` を **意図的に除外** している (理由は次節)。
+スレーブファームのブロブをパーティションへ直接書き込みたい場合は:
+
+```bash
+make flash-c6 PORT=/dev/ttyACM0
+```
+
+これは `esptool --force write-flash 0x710000 build/c6_fw.bin` を呼び出す
+専用ターゲット。`--force` 無しでは P4 ホスト側 esptool が C6 イメージの
+チップ ID 不一致を検出して abort する。
+
+普段は **手動書き込みは初回セットアップだけ**で十分。それ以降は本ファームの
+ブート時 OTA が後続バージョンを自動的に流し込む。
+
+### なぜ `c6_fw.bin` を `flash_args` から外すのか
+
+`esptool write-flash` は各入力ファイルの IDF イメージヘッダを検査し、
+チップ ID がホスト側 (`esp32p4`) と一致しないと
+
+```
+A fatal error occurred: 'c6_fw.bin' is not an ESP32-P4 image.
+Use the force argument to flash anyway.
+```
+
+で abort する。`c6_fw.bin` はそもそも ESP32-C6 のアプリイメージなので、
+`flash_args` (= 主 `flash` ターゲットの入力) に含めると **必ず失敗**する。
+代わりに:
+
+- **手動セットアップ**: `make flash-c6` (`--force` 付き) を独立ターゲットで提供
+- **リリース ZIP の単一ファイル `firmware-vX.Y.Z.bin`**: `script/pack_firmware.py`
+  に `--extra 0x710000:build/c6_fw.bin` を渡して `c6_fw` も含めて結合
+  (`esptool` を経由しないので validation 制約は無関係)
+- **Web Flasher (`docs/index.html`)**: `FLASH_PARTS` の optional 5 番目として
+  `c6_fw.bin` を持つ。ZIP に同梱されていれば書き込み、無ければ skip
+
 ## 失敗モードとログメッセージ
 
 | ログ (TAG=`c6_fw`) | 意味 | 対処 |

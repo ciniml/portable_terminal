@@ -84,6 +84,15 @@ qemu-kill:
 flash:
 	bash -c "source $(IDF_EXPORTS) && idf.py $(IDFPY_PORT) flash"
 
+# Flash the ESP32-C6 slave fw blob into the c6_fw partition. Kept out of
+# the main `flash` target because esptool's per-file IDF-image-header
+# validation refuses a C6 binary on a P4 host without --force; this
+# custom target invokes esptool with --force explicitly. Only needed
+# for the initial install of the slave fw — after that the boot-time
+# auto-update (main/c6_fw_update.cpp) keeps the C6 current.
+flash-c6:
+	bash -c "source $(IDF_EXPORTS) && ESPPORT='$(if $(PORT),$(PORT))' idf.py $(IDFPY_PORT) flash-c6"
+
 monitor:
 	bash -c "source $(IDF_EXPORTS) && idf.py $(IDFPY_PORT) monitor"
 

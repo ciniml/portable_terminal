@@ -18,11 +18,24 @@ def main():
                    help='IDF build directory (default: build).')
     p.add_argument('--out', default='firmware.bin',
                    help='Output filename (default: firmware.bin).')
+    p.add_argument('--extra', action='append', default=[],
+                   metavar='OFFSET:PATH',
+                   help='Additional binaries to splice in at OFFSET '
+                        '(hex, e.g. 0x710000). May be repeated. PATH is '
+                        'resolved relative to the current working dir, '
+                        'NOT the build dir, so absolute paths or '
+                        '"build/c6_fw.bin"-style are both fine. Used to '
+                        'bundle the c6_fw partition image (an ESP32-C6 '
+                        'app that esptool refuses to keep in the main '
+                        'flash_args without --force).')
     args = p.parse_args()
 
     build_dir = pathlib.Path(args.build_dir)
     flash_args = build_dir / 'flash_args'
 
+    # Tuples: (offset, source_path). source_path is relative to
+    # build_dir when it came from flash_args, absolute / cwd-relative
+    # when it came from --extra. Resolve both consistently below.
     targets = []
     with open(flash_args) as f:
         for line in iter(f.readline, ''):
@@ -30,19 +43,24 @@ def main():
             if m:
                 start_address = int(m.group(1), 16)
                 path = m.group(2)
-                targets.append((start_address, path))
+                targets.append((start_address, build_dir / path))
+
+    for spec in args.extra:
+        if ':' not in spec:
+            raise SystemExit(f'--extra needs OFFSET:PATH, got {spec!r}')
+        off_str, path = spec.split(':', 1)
+        targets.append((int(off_str, 0), pathlib.Path(path)))
 
     targets.sort(key=lambda x: x[0])
     print(targets)
 
     with open(args.out, 'wb') as f:
         current_address = 0
-        for start_address, path in targets:
+        for start_address, bin_path in targets:
             if current_address < start_address:
                 pad = b'\xff' * (start_address - current_address)
                 f.write(pad)
                 current_address += len(pad)
-            bin_path = build_dir / path
             with open(bin_path, 'rb') as g:
                 data = g.read()
                 f.write(data)
