@@ -99,9 +99,12 @@ static pending_ping_t *pending_alloc(void)
     for (int i = 0; i < DISCO_PENDING_MAX; i++) {
         if (!s_pending[i].in_use) return &s_pending[i];
     }
-    /* Overflow: recycle slot 0. The lost ping just won't trigger an
-     * endpoint update; the next netmap apply will issue another. */
-    return &s_pending[0];
+    /* Overflow: refuse the allocation. The caller should skip the
+     * send entirely — recycling slot 0 would clobber another in-flight
+     * TxID and make its Pong un-routable, which is worse than dropping
+     * the new probe (the next netmap_apply tick will retry anyway,
+     * within ~1 min). */
+    return NULL;
 }
 
 static pending_ping_t *pending_find(const uint8_t tx_id[DISCO_TXID_LEN])
@@ -193,6 +196,12 @@ esp_err_t ts_disco_init(const uint8_t disco_priv[32],
     return ESP_OK;
 }
 
+bool ts_disco_is_verified(uint8_t wg_peer_index)
+{
+    if (wg_peer_index >= DISCO_VERIFIED_MAX) return false;
+    return s_verified[wg_peer_index];
+}
+
 esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
                              const uint8_t peer_node_pub[32],
                              const uint8_t peer_disco_pub[32],
@@ -219,6 +228,16 @@ esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
                                       frame, sizeof(frame), &frame_len);
     if (err != ESP_OK) return err;
 
+    /* Register pending BEFORE sending — otherwise a fast Pong could arrive
+     * before we're ready to route it. On pool overflow, skip the send
+     * entirely (see pending_alloc()). */
+    pending_ping_t *p = pending_alloc();
+    if (!p) {
+        ESP_LOGD(TAG, "pending pool full — dropping ping for peer=%u",
+                 wg_peer_index);
+        return ESP_ERR_NO_MEM;
+    }
+
     err_t lwerr = wireguard_esp32_udp_send(cand_ip, cand_port, frame, frame_len);
     if (lwerr != ERR_OK) {
         ESP_LOGW(TAG, "udp_send -> %d for ping to %08x:%u",
@@ -227,9 +246,6 @@ esp_err_t ts_disco_send_ping(uint8_t wg_peer_index,
         return ESP_FAIL;
     }
 
-    /* Register pending so the Pong handler can route the endpoint update
-     * to the right wg peer. */
-    pending_ping_t *p = pending_alloc();
     p->in_use = true;
     memcpy(p->tx_id,          tx_id_field,    DISCO_TXID_LEN);
     memcpy(p->peer_disco_pub, peer_disco_pub, 32);

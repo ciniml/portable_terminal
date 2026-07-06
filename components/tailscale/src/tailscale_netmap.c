@@ -561,7 +561,16 @@ static void apply_one_peer(const peer_parse_t *p, bool *keep)
         s_peers[slot].node_id = p->node_id;
         if (p->name[0]) strlcpy(s_peers[slot].name, p->name,
                                 sizeof(s_peers[slot].name));
-        if (!ip_addr_isany(&ep_ip) && ep_port != 0) {
+        /* Only reset the WG peer endpoint when DISCO has NOT yet verified
+         * a direct path. Otherwise every ~1 min KeepAlive-driven netmap
+         * apply would downgrade a working direct UDP endpoint (set by
+         * ts_disco_rx() → wireguard_esp32_update_endpoint) back to the
+         * DERP pseudo endpoint (127.3.3.40:<region>) we're about to feed
+         * in via ep_ip/ep_port. That reset would stall the direct path
+         * until the next Pong — but Pongs stop coming once s_verified
+         * short-circuits future probes, so we'd end up stuck on DERP. */
+        if (!ip_addr_isany(&ep_ip) && ep_port != 0 &&
+            !ts_disco_is_verified(s_peers[slot].wg_index)) {
             wireguard_esp32_update_endpoint(s_peers[slot].wg_index,
                                             &ep_ip, ep_port);
         }

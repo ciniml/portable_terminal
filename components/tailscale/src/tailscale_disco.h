@@ -114,6 +114,17 @@ esp_err_t ts_disco_send_call_me_maybe(uint8_t wg_peer_index,
                                        const uint8_t peer_disco_pub[32],
                                        uint8_t peer_derp_region);
 
+/**
+ * @brief True if a Pong has verified a direct path for this WG peer.
+ *
+ * Set once by the Pong handler on first successful direct-path probe
+ * (`s_verified[wg_peer_index] = true`). Callers (tailscale_netmap.c)
+ * use this to avoid downgrading a verified direct endpoint back to
+ * DERP pseudo on every subsequent netmap apply. Out-of-range indices
+ * return false so it's safe to call speculatively.
+ */
+bool ts_disco_is_verified(uint8_t wg_peer_index);
+
 #ifdef __cplusplus
 }
 #endif
