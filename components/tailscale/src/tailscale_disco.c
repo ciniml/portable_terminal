@@ -79,12 +79,32 @@ static pending_ping_t  s_pending[DISCO_PENDING_MAX];
  * unreachable interfaces. Cleared when the peer is removed from the
  * netmap (or, conservatively, never — re-init zeros it). */
 static bool            s_verified[DISCO_VERIFIED_MAX];
+/* Last Pong-recv timestamp per WG peer (microseconds since boot). Used by
+ * the periodic re-verify sweep below: a peer whose direct path is still
+ * healthy will have refreshed this within the last window (WG keepalive
+ * is bi-directional and DISCO Ping/Pong is a keepalive by definition too).
+ * When the sweep sees no fresh Pong, s_verified is cleared so the next
+ * netmap apply re-probes — recovering from NAT-mapping timeouts, peer-
+ * side roaming to a new address, or any other silent-failure of the
+ * previously-verified endpoint. */
+static int64_t         s_last_pong_ts[DISCO_VERIFIED_MAX];
 
 /* Rate-limit: at most one outbound CallMeMaybe per WG peer per 30 s.
  * Indexed by wg_peer_index. esp_timer_get_time() is microseconds since boot. */
 #define DISCO_PEERS_MAX                16
 #define DISCO_CALL_ME_MAYBE_INTERVAL_US (30LL * 1000LL * 1000LL)
 static int64_t         s_last_call_me_maybe_ts[DISCO_PEERS_MAX];
+
+/* Watchdog: sweep every 60 s. If a verified peer hasn't seen a Pong (or
+ * initial Pong verification) in ~5 min, drop verification so the next
+ * netmap_apply can re-probe. Values chosen to sit comfortably above the
+ * WG 25 s keepalive interval (which itself keeps NAT mappings warm and
+ * would normally cause DISCO chatter as a side effect on any surviving
+ * direct path). Longer window than #1 to avoid unnecessary flapping. */
+#define DISCO_REVERIFY_SWEEP_US  (60LL * 1000LL * 1000LL)
+#define DISCO_REVERIFY_STALE_US  (5LL * 60LL * 1000LL * 1000LL)
+static esp_timer_handle_t s_reverify_timer = NULL;
+static void reverify_sweep_cb(void *arg);
 
 /* Forward decl — registered with wireguardif as the DISCO input callback. */
 static void ts_disco_rx(const uint8_t *data, size_t len,
@@ -173,8 +193,54 @@ static int open_disco_frame(const uint8_t *frame, size_t frame_len,
 }
 
 /* ------------------------------------------------------------------ */
+/* Periodic re-verify sweep                                             */
+/* ------------------------------------------------------------------ */
+
+static void reverify_sweep_cb(void *arg)
+{
+    (void)arg;
+    if (!s_inited) return;
+    int64_t now = esp_timer_get_time();
+    int cleared = 0;
+    for (int i = 0; i < DISCO_VERIFIED_MAX; i++) {
+        if (!s_verified[i]) continue;
+        int64_t age = now - s_last_pong_ts[i];
+        if (age > DISCO_REVERIFY_STALE_US) {
+            s_verified[i] = false;
+            s_last_pong_ts[i] = 0;
+            /* Also clear the CallMeMaybe rate-limit so the next netmap
+             * apply is free to re-invite the peer. */
+            if (i < DISCO_PEERS_MAX) s_last_call_me_maybe_ts[i] = 0;
+            cleared++;
+        }
+    }
+    if (cleared > 0) {
+        ESP_LOGI(TAG, "re-verify: cleared %d stale peer(s); next netmap apply will re-probe",
+                 cleared);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Public API                                                           */
 /* ------------------------------------------------------------------ */
+
+void ts_disco_reset_peer(uint8_t wg_peer_index)
+{
+    if (wg_peer_index < DISCO_VERIFIED_MAX) {
+        s_verified[wg_peer_index] = false;
+        s_last_pong_ts[wg_peer_index] = 0;
+    }
+    if (wg_peer_index < DISCO_PEERS_MAX) {
+        s_last_call_me_maybe_ts[wg_peer_index] = 0;
+    }
+    /* Also drop any in-flight Pings targeting this slot — a Pong routed
+     * back to a stale slot would be at best noise, at worst mis-verify. */
+    for (int i = 0; i < DISCO_PENDING_MAX; i++) {
+        if (s_pending[i].in_use && s_pending[i].wg_peer_index == wg_peer_index) {
+            s_pending[i].in_use = false;
+        }
+    }
+}
 
 esp_err_t ts_disco_init(const uint8_t disco_priv[32],
                         const uint8_t disco_pub[32],
@@ -186,8 +252,26 @@ esp_err_t ts_disco_init(const uint8_t disco_priv[32],
     memcpy(s_node_pub,   node_pub,   32);
     memset(s_pending,    0, sizeof(s_pending));
     memset(s_verified,   0, sizeof(s_verified));
+    memset(s_last_pong_ts, 0, sizeof(s_last_pong_ts));
     memset(s_last_call_me_maybe_ts, 0, sizeof(s_last_call_me_maybe_ts));
     s_inited = true;
+
+    /* Periodic re-verify sweep — one-shot esp_timer, restarted on every
+     * DISCO init so a Tailscale down/up leaves us with a clean handle. */
+    if (!s_reverify_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = &reverify_sweep_cb,
+            .name     = "ts_disco_reverify",
+        };
+        if (esp_timer_create(&args, &s_reverify_timer) != ESP_OK) {
+            s_reverify_timer = NULL;
+            ESP_LOGW(TAG, "reverify timer create failed — periodic re-verify disabled");
+        }
+    }
+    if (s_reverify_timer) {
+        (void)esp_timer_stop(s_reverify_timer);   /* idempotent */
+        esp_timer_start_periodic(s_reverify_timer, DISCO_REVERIFY_SWEEP_US);
+    }
 
     wireguard_esp32_set_disco_input(ts_disco_rx);
     ESP_LOGI(TAG, "DISCO ready (disco_pub %02x%02x%02x%02x... node_pub %02x%02x%02x%02x...)",
@@ -465,14 +549,19 @@ static void ts_disco_rx(const uint8_t *data, size_t len,
         /* First valid Pong wins. Later pongs for the same WG peer
          * (multi-probe races among candidates) shouldn't toggle the
          * endpoint back to a path that was simply slower-but-still-
-         * reachable. */
+         * reachable. But we DO refresh s_last_pong_ts so the periodic
+         * re-verify sweep sees the peer as still alive on this path. */
         if (wg_idx < DISCO_VERIFIED_MAX && s_verified[wg_idx]) {
+            s_last_pong_ts[wg_idx] = esp_timer_get_time();
             ESP_LOGD(TAG, "Pong from %08x:%u for peer %u — already direct",
                      (unsigned)ip_2_ip4(src_ip)->addr, (unsigned)src_port,
                      wg_idx);
             return;
         }
-        if (wg_idx < DISCO_VERIFIED_MAX) s_verified[wg_idx] = true;
+        if (wg_idx < DISCO_VERIFIED_MAX) {
+            s_verified[wg_idx] = true;
+            s_last_pong_ts[wg_idx] = esp_timer_get_time();
+        }
 
         ESP_LOGI(TAG, "Pong recv from %u.%u.%u.%u:%u → peer %u direct",
                  (unsigned)((ip_2_ip4(src_ip)->addr      ) & 0xFF),

@@ -24,6 +24,7 @@
 
 #include "sdkconfig.h"
 
+#include <stdint.h>   /* SIZE_MAX */
 #include <string.h>
 #include <ctype.h>
 
@@ -42,9 +43,12 @@ static ts_pubip_result_fn s_cb           = NULL;
 static TaskHandle_t       s_task         = NULL;
 static SemaphoreHandle_t  s_sem          = NULL;
 static TimerHandle_t      s_timer        = NULL;
-static uint32_t           s_last_ip_be   = 0;
+/* LRU of the last N distinct (ip, port) tuples we've observed. Index 0
+ * is most recent. Grows to at most TS_PUBIP_MAX_RECENT entries; on
+ * overflow the oldest slot is displaced. */
+static uint32_t           s_recent_ip[TS_PUBIP_MAX_RECENT];
+static size_t             s_recent_n     = 0;
 static uint16_t           s_last_port    = 0;
-static bool               s_have_last    = false;
 static volatile bool      s_running      = false;
 
 /* ------------------------------------------------------------------ */
@@ -158,8 +162,37 @@ static esp_err_t do_get(const char *url, char *buf, size_t cap)
     return ESP_OK;
 }
 
-/* Run one probe: try primary, then fallback. On success, dedup against the
- * previous result and invoke the callback when it has changed. */
+/* Prepend @ip_be to the LRU. If @ip_be is already in the recent set,
+ * it moves to the front (0). Returns true when the set changed (either
+ * a new entry was inserted or the head moved). */
+static bool lru_touch(uint32_t ip_be)
+{
+    size_t found = SIZE_MAX;
+    for (size_t i = 0; i < s_recent_n; i++) {
+        if (s_recent_ip[i] == ip_be) { found = i; break; }
+    }
+    if (found == 0) {
+        return false;   /* already at head; no change */
+    }
+    if (found != SIZE_MAX) {
+        /* Move-to-front: shift 0..found-1 down by one, put at head. */
+        for (size_t i = found; i > 0; i--) s_recent_ip[i] = s_recent_ip[i-1];
+        s_recent_ip[0] = ip_be;
+        return true;
+    }
+    /* New entry: shift everyone down by one (drop the tail if full),
+     * insert at head. */
+    size_t shift_to = (s_recent_n < TS_PUBIP_MAX_RECENT) ? s_recent_n
+                                                        : (TS_PUBIP_MAX_RECENT - 1);
+    for (size_t i = shift_to; i > 0; i--) s_recent_ip[i] = s_recent_ip[i-1];
+    s_recent_ip[0] = ip_be;
+    if (s_recent_n < TS_PUBIP_MAX_RECENT) s_recent_n++;
+    return true;
+}
+
+/* Run one probe: try primary, then fallback. On success, merge the result
+ * into the LRU; when the recent set changed, invoke the callback with the
+ * whole set so peers see every plausible endpoint at once. */
 static void run_probe(void)
 {
     char  body[PUBIP_RX_BUF_MAX];
@@ -181,22 +214,25 @@ static void run_probe(void)
 
     uint16_t port = (uint16_t)CONFIG_TAILSCALE_LISTEN_PORT;
 
-    if (s_have_last && ip_be == s_last_ip_be && port == s_last_port) {
-        ESP_LOGD(TAG, "unchanged endpoint");
+    bool changed = lru_touch(ip_be);
+    /* Port never changes today (host byte order compile-time constant), so
+     * once we've populated s_last_port and nothing changed in the LRU, the
+     * publish state is stable and we can skip the callback. */
+    if (!changed && port == s_last_port) {
+        ESP_LOGD(TAG, "unchanged endpoint (recent set %u entries)",
+                 (unsigned)s_recent_n);
         return;
     }
-    s_last_ip_be = ip_be;
-    s_last_port  = port;
-    s_have_last  = true;
+    s_last_port = port;
 
-    ESP_LOGI(TAG, "discovered %u.%u.%u.%u:%u",
+    ESP_LOGI(TAG, "discovered %u.%u.%u.%u:%u (recent set: %u entries)",
              (unsigned)((ip_be      ) & 0xFF),
              (unsigned)((ip_be >>  8) & 0xFF),
              (unsigned)((ip_be >> 16) & 0xFF),
              (unsigned)((ip_be >> 24) & 0xFF),
-             (unsigned)port);
+             (unsigned)port, (unsigned)s_recent_n);
 
-    if (s_cb) s_cb(ip_be, port);
+    if (s_cb) s_cb(s_recent_ip, s_recent_n, port);
 }
 
 /* ------------------------------------------------------------------ */
@@ -229,10 +265,10 @@ esp_err_t ts_pubip_init(ts_pubip_result_fn cb)
 {
     if (s_running) return ESP_ERR_INVALID_STATE;
 
-    s_cb         = cb;
-    s_have_last  = false;
-    s_last_ip_be = 0;
-    s_last_port  = 0;
+    s_cb        = cb;
+    s_recent_n  = 0;
+    s_last_port = 0;
+    memset(s_recent_ip, 0, sizeof(s_recent_ip));
 
     s_sem = xSemaphoreCreateBinary();
     if (!s_sem) {
@@ -301,8 +337,9 @@ void ts_pubip_deinit(void)
         vSemaphoreDelete(s_sem);
         s_sem = NULL;
     }
-    s_cb        = NULL;
-    s_have_last = false;
+    s_cb       = NULL;
+    s_recent_n = 0;
+    memset(s_recent_ip, 0, sizeof(s_recent_ip));
 }
 
 void ts_pubip_kick(void)

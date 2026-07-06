@@ -125,6 +125,22 @@ esp_err_t ts_disco_send_call_me_maybe(uint8_t wg_peer_index,
  */
 bool ts_disco_is_verified(uint8_t wg_peer_index);
 
+/**
+ * @brief Drop all per-peer DISCO state for a WG slot.
+ *
+ * Called by the netmap layer when a peer disappears from the netmap so
+ * a future peer that reuses the same WG slot doesn't inherit stale
+ * "already verified" / "CallMeMaybe rate-limited" state (fixes the
+ * bug where a slot re-assignment silently prevented the initial
+ * CallMeMaybe on the new peer). Also called internally by the
+ * periodic re-verify sweep when a direct path has gone silent for
+ * longer than the stale window — the next netmap apply re-probes.
+ *
+ * Clears: `s_verified[]`, `s_last_pong_ts[]`, `s_last_call_me_maybe_ts[]`,
+ * and any in-flight Pings targeting this slot.
+ */
+void ts_disco_reset_peer(uint8_t wg_peer_index);
+
 #ifdef __cplusplus
 }
 #endif

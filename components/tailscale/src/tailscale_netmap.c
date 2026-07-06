@@ -706,6 +706,13 @@ static void parse_peer_array_stream(ts_js_t *j, bool full_snapshot)
             if (s_peers[i].active && !keep[i]) {
                 ESP_LOGI(TAG, "Removing peer %s (wg_idx=%d)",
                          s_peers[i].ts_ip, s_peers[i].wg_index);
+                /* Drop DISCO's per-peer state BEFORE the WG slot is freed
+                 * so a subsequently-re-added peer that lands on the same
+                 * wg_index starts from a clean "unverified + no CMM sent"
+                 * baseline. Without this, the new peer inherits the old
+                 * peer's rate-limit + verified flag and its initial
+                 * CallMeMaybe silently gets skipped. */
+                ts_disco_reset_peer(s_peers[i].wg_index);
                 wireguard_esp32_remove_peer(s_peers[i].wg_index);
                 s_peers[i].active = false;
             }
@@ -726,6 +733,8 @@ static void parse_peers_removed_stream(ts_js_t *j)
             ESP_LOGI(TAG, "Removing peer %s (id=%lld, wg_idx=%d)",
                      s_peers[slot].ts_ip, (long long)node_id,
                      s_peers[slot].wg_index);
+            /* Same rationale as the full-snapshot branch above. */
+            ts_disco_reset_peer(s_peers[slot].wg_index);
             wireguard_esp32_remove_peer(s_peers[slot].wg_index);
             s_peers[slot].active = false;
         }

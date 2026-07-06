@@ -85,19 +85,35 @@ done:
 /* Pubip result → MapRequest.Endpoints                                  */
 /* ------------------------------------------------------------------ */
 
-static void pubip_result_cb(uint32_t ip_be, uint16_t port)
+static void pubip_result_cb(const uint32_t *ip_be_arr, size_t n, uint16_t port)
 {
-    char buf[CTRL_MAX_EP_LEN];
-    snprintf(buf, sizeof(buf), "%u.%u.%u.%u:%u",
-             (unsigned)((ip_be      ) & 0xFF),
-             (unsigned)((ip_be >>  8) & 0xFF),
-             (unsigned)((ip_be >> 16) & 0xFF),
-             (unsigned)((ip_be >> 24) & 0xFF),
-             (unsigned)port);
-    const char *eps[1] = { buf };
-    ts_ctrl_set_endpoints(eps, 1);
+    /* Format up to min(N, CTRL_MAX_ENDPOINTS) recent IPs and publish them
+     * all in one go. Dual-WAN home setups can serve HTTPS-probes from a
+     * different WAN than WG UDP is going out on, so publishing the full
+     * recent set lets peers pick whichever matches their inbound path. */
+    char        buf[CTRL_MAX_ENDPOINTS][CTRL_MAX_EP_LEN];
+    const char *eps[CTRL_MAX_ENDPOINTS];
+    size_t cap = (n < (size_t)CTRL_MAX_ENDPOINTS) ? n : (size_t)CTRL_MAX_ENDPOINTS;
+    for (size_t i = 0; i < cap; i++) {
+        uint32_t ip_be = ip_be_arr[i];
+        snprintf(buf[i], CTRL_MAX_EP_LEN, "%u.%u.%u.%u:%u",
+                 (unsigned)((ip_be      ) & 0xFF),
+                 (unsigned)((ip_be >>  8) & 0xFF),
+                 (unsigned)((ip_be >> 16) & 0xFF),
+                 (unsigned)((ip_be >> 24) & 0xFF),
+                 (unsigned)port);
+        eps[i] = buf[i];
+    }
+    ts_ctrl_set_endpoints(eps, (int)cap);
     ts_ctrl_signal_endpoints_dirty();
-    ESP_LOGI(TAG, "Public endpoint: %s", buf);
+    if (cap == 1) {
+        ESP_LOGI(TAG, "Public endpoint: %s", buf[0]);
+    } else {
+        ESP_LOGI(TAG, "Public endpoints (%u):", (unsigned)cap);
+        for (size_t i = 0; i < cap; i++) {
+            ESP_LOGI(TAG, "  [%u] %s", (unsigned)i, buf[i]);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
