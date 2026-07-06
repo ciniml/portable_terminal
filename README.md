@@ -194,6 +194,34 @@ make clean-host
 
 Expected: 52 / 52 tests pass.
 
+## OTA update
+
+The firmware polls a `latest.json` manifest on GitHub Pages every 6 h
+(±15 min jitter, seeded from the STA MAC) and installs newer builds via
+`esp_https_ota`. The pipeline is:
+
+1. GET `<base>/latest.json` (default base URL is a Kconfig value; NVS
+   `ota.base_url` overrides).
+2. SemVer-compare `esp_app_desc.version` against `latest.json:tag`.
+   Downgrades are refused unless the manifest sets `allow_downgrade: true`.
+3. Download the referenced app image (256 KB partial-HTTP chunks so a
+   Wi-Fi flap doesn't cost a full restart).
+4. Deferred reboot — wait until no `IConnection` is active (up to 30 min).
+5. After the new image boots, wait 120 s of healthy operation and call
+   `esp_ota_mark_app_valid_cancel_rollback`. If the app crashes / hangs
+   inside the window, the bootloader rolls us back on the next reset.
+
+Runtime knobs (NVS namespace `"ota"`):
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `auto` | u8 | `1` (follows `CONFIG_TAB5_OTA_ENABLED`) | auto-poll gate |
+| `base_url` | str | (empty → Kconfig default) | polling base URL |
+| `pinned_tag` | str | (empty) | if set, only that tag installs |
+| `rollback_cnt` | u32 | 0 | number of bootloader rollbacks observed |
+
+Full design + threat model: [docs/OTA_UPDATE_DESIGN.md](docs/OTA_UPDATE_DESIGN.md).
+
 ## Tailscale NAT traversal
 
 See [docs/TAILSCALE_PORTING_NOTES.md](docs/TAILSCALE_PORTING_NOTES.md) for the

@@ -28,6 +28,7 @@ idf_component_register(
         "input_touch.cpp"
         "input_usb_hid.cpp"
         "menu.cpp"
+        "ota_task.cpp"
         "soft_keyboard.cpp"
         "wifi_config.cpp"
         "wifi_setup.cpp"
@@ -57,6 +58,10 @@ idf_component_register(
         libssh2
         mbedtls
         lwip
+        app_update
+        esp_http_client
+        esp_https_ota
+        espressif__cjson
         espressif__usb
         espressif__usb_host_hid
         # esp_driver_i2c is needed by main/input_tab5_kbd.cpp's standalone

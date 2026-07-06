@@ -138,11 +138,45 @@ jobs:
           (cd "$outdir" && zip -r "../firmware-${VERSION}.zip" .)
           ls -lh "firmware-${VERSION}.zip"
 
+      - name: Emit OTA manifest (latest.json)
+        # Emit a per-release latest.json that the on-device OTA client
+        # (main/ota_task.cpp) can poll. The pages.yml workflow copies
+        # this alongside the raw app binary into
+        # _site/firmware/<tag>/latest.json AND _site/latest.json.
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          SHA=$(sha256sum "release/tab5_claude_client.bin" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "release/tab5_claude_client.bin")
+          cat > release/latest.json <<EOF
+          {
+            "tag": "${VERSION}",
+            "url": "${PAGES_BASE}/firmware/${VERSION}/tab5_claude_client.bin",
+            "sha256": "${SHA}",
+            "size": ${SIZE},
+            "project_name": "tab5_claude_client",
+            "chip_id": "esp32p4"
+          }
+          EOF
+          cat release/latest.json
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ steps.version.outputs.version }}
           path: firmware-${{ steps.version.outputs.version }}.zip
+          retention-days: 90
+
+      - name: Upload raw app binary (for OTA + Pages staging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ steps.version.outputs.version }}
+          path: |
+            release/tab5_claude_client.bin
+            release/latest.json
           retention-days: 90
 
   release:
@@ -167,11 +201,19 @@ jobs:
         with:
           name: firmware-${{ steps.version.outputs.version }}
 
+      - name: Download raw app artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-${{ steps.version.outputs.version }}
+          path: app_raw
+
       - name: Create / update Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             firmware-${{ steps.version.outputs.version }}.zip
+            app_raw/tab5_claude_client.bin
+            app_raw/latest.json
           body: |
             # tab5_claude_client ${{ steps.version.outputs.version }}
 

@@ -18,6 +18,9 @@
 #include "wifi_setup.hpp"
 #endif
 #include "vpn.hpp"
+#if CONFIG_TAB5_OTA_ENABLED
+#include "ota_task.hpp"
+#endif
 
 namespace tab5 {
 
@@ -171,6 +174,48 @@ void status_render_impl() {
         d.setTextColor(kFgColor, kBgColor);
 #endif
     }
+
+    // --- OTA (only when active) ----------------------------------
+#if CONFIG_TAB5_OTA_ENABLED
+    {
+        auto os = ota::snapshot();
+        using P = ota::Status::Phase;
+        if (os.phase != P::Idle) {
+            y += 4;
+            label("--- OTA ---");
+            const char* pl =
+                (os.phase == P::Polling)        ? "checking"   :
+                (os.phase == P::Downloading)    ? "downloading":
+                (os.phase == P::Verifying)      ? "verifying"  :
+                (os.phase == P::DeferredReboot) ? "reboot pending" :
+                (os.phase == P::Failed)         ? "failed" : "?";
+            uint16_t oc =
+                (os.phase == P::Failed) ? kBatCritColor :
+                (os.phase == P::DeferredReboot) ? kBatLowColor :
+                kBatGoodColor;
+            d.setTextColor(oc, kBgColor);
+            value(pl);
+            d.setTextColor(kFgColor, kBgColor);
+            if (os.phase == P::Downloading && os.percent >= 0) {
+                char pbuf[24];
+                snprintf(pbuf, sizeof(pbuf), "%d%%", os.percent);
+                value(pbuf);
+                int bx = kPanelX + 14;
+                int bw = kPanelW - 28;
+                int bh = 8;
+                d.drawRect(bx, y, bw, bh, kFgColor);
+                int fw = (bw - 2) * os.percent / 100;
+                if (fw > 0) d.fillRect(bx + 1, y + 1, fw, bh - 2, kBatGoodColor);
+                y += bh + 12;
+            }
+            if (os.target_version[0]) {
+                char tbuf[40];
+                snprintf(tbuf, sizeof(tbuf), "-> %.28s", os.target_version);
+                value(tbuf);
+            }
+        }
+    }
+#endif
 
     // --- Uptime --------------------------------------------------
     y += 6;

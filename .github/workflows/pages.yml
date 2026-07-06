@@ -42,7 +42,7 @@ jobs:
           set -euo pipefail
           mkdir -p _site/firmware
           tags_json=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
-                        --json tagName,isDraft,isPrerelease)
+                        --json tagName,isDraft,isPrerelease,publishedAt)
           mapfile -t tags < <(echo "$tags_json" | jq -r '.[] | select(.isDraft|not) | .tagName')
 
           # Per-tag NDJSON record. Each release publishes one
@@ -50,6 +50,9 @@ jobs:
           # matrix). We stage it under firmware/<tag>/ and record it in
           # versions.json so the web flasher can find it.
           : > /tmp/per_tag.ndjson
+          # Track the most recent non-prerelease tag for _site/latest.json.
+          # gh release list returns newest first, so first hit wins.
+          latest_stable_tag=""
           for tag in "${tags[@]}"; do
             asset=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets \
                      --jq '.assets[] | select(.name|test("^firmware-.*\\.zip$")) | .name' \
@@ -63,6 +66,38 @@ jobs:
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" -p "$asset" -D "$dest" --clobber
             echo "[ok] $tag -> $dest/$asset"
             echo "{\"tag\":\"$tag\",\"zip\":\"$asset\"}" >> /tmp/per_tag.ndjson
+
+            # OTA staging: prefer the raw asset (release.yml >= v0.3 uploads
+            # tab5_claude_client.bin + latest.json), and fall back to unzipping
+            # the firmware ZIP for older tags.
+            if gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                 -p "tab5_claude_client.bin" -p "latest.json" \
+                 -D "$dest" --clobber 2>/dev/null; then
+              echo "[ok] $tag: staged raw app + latest.json"
+            else
+              echo "[info] $tag: no raw OTA assets — unzipping ZIP"
+              (cd "$dest" && unzip -o "$asset" tab5_claude_client.bin >/dev/null 2>&1 || true)
+              # Older tags have no latest.json in the release; synthesize one
+              # so the file exists at the tag URL for pinning.
+              if [ ! -f "$dest/latest.json" ] && [ -f "$dest/tab5_claude_client.bin" ]; then
+                SHA=$(sha256sum "$dest/tab5_claude_client.bin" | cut -d' ' -f1)
+                SIZE=$(stat -c%s "$dest/tab5_claude_client.bin")
+                PAGES_BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY##*/}"
+                cat > "$dest/latest.json" <<EOF
+          {"tag":"$tag","url":"$PAGES_BASE/firmware/$tag/tab5_claude_client.bin","sha256":"$SHA","size":$SIZE,"project_name":"tab5_claude_client","chip_id":"esp32p4"}
+          EOF
+              fi
+            fi
+
+            # First non-prerelease tag wins for _site/latest.json.
+            if [ -z "$latest_stable_tag" ]; then
+              is_pre=$(echo "$tags_json" | jq -r --arg t "$tag" '.[] | select(.tagName==$t) | .isPrerelease')
+              if [ "$is_pre" != "true" ] && [ -f "$dest/latest.json" ]; then
+                cp "$dest/latest.json" _site/latest.json
+                latest_stable_tag="$tag"
+                echo "[ok] $tag -> _site/latest.json"
+              fi
+            fi
           done
 
           # versions.json: ordered list of {tag, zip}. The web flasher
@@ -70,6 +105,8 @@ jobs:
           jq -s '.' < /tmp/per_tag.ndjson > _site/versions.json
           echo "--- versions.json ---"
           cat _site/versions.json
+          echo "--- _site/latest.json ---"
+          [ -f _site/latest.json ] && cat _site/latest.json || echo "(none)"
           echo "--- _site/firmware ---"
           find _site/firmware -maxdepth 2 -type f | sort
 

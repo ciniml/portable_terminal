@@ -53,6 +53,9 @@
 #include "usbserial_connection.hpp"
 #include "usb_host_root.hpp"
 #include "term_core/terminal.hpp"
+#if CONFIG_TAB5_OTA_ENABLED
+#include "ota_task.hpp"
+#endif
 
 namespace {
 
@@ -353,6 +356,14 @@ void do_boot_sequence(const BootDeps& d) {
 void boot_task(void* arg) {
     std::unique_ptr<BootDeps> deps{static_cast<BootDeps*>(arg)};
     do_boot_sequence(*deps);
+#if CONFIG_TAB5_OTA_ENABLED
+    // Start the OTA supervisor once Wi-Fi / VPN bring-up has settled.
+    // The task itself waits on its own trigger queue with a long delay,
+    // so a still-down Wi-Fi at this point just means the first poll
+    // will fail once and back off — the reconnect supervisor handles
+    // recovery independently.
+    tab5::ota::start();
+#endif
     vTaskDelete(nullptr);
 }
 
@@ -373,6 +384,15 @@ extern "C" void app_main(void) {
         }
         ESP_ERROR_CHECK(err);
     }
+
+#if CONFIG_TAB5_OTA_ENABLED
+    // Arm the 120 s rollback-marker timer BEFORE anything that could
+    // deadlock or crash — if we don't reach mark_app_valid within the
+    // window the bootloader rolls us back on next reboot. Also records
+    // NVS "rollback_cnt" if the running slot state says the previous
+    // boot was rolled back.
+    tab5::ota::arm_post_boot_health_check();
+#endif
 
     g_mutex = xSemaphoreCreateRecursiveMutex();
 

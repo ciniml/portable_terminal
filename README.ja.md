@@ -190,6 +190,35 @@ make clean-host
 
 期待結果: 52 / 52 テストが成功。
 
+## OTA アップデート
+
+GitHub Pages にホストされた `latest.json` を 6 時間おき (±15 分のジッタ、
+STA MAC 由来のシードで機体分散) にポーリングし、新しいバージョンがあれば
+`esp_https_ota` で自動更新します。
+
+1. `<base>/latest.json` を GET (デフォルト URL は Kconfig、NVS `ota.base_url`
+   で上書き可)
+2. `esp_app_desc.version` と `latest.json:tag` を SemVer 比較。
+   ダウングレードは `allow_downgrade: true` が manifest にある場合のみ許可。
+3. アプリバイナリを 256 KB の HTTP Range 分割でダウンロード
+   (Wi-Fi 瞬断でも全体再送にならない)。
+4. 遅延リブート — アクティブな `IConnection` が無くなるまで最大 30 分待機。
+5. 新イメージ起動後 120 秒間正常動作したら
+   `esp_ota_mark_app_valid_cancel_rollback` を発行。ハング / クラッシュ
+   した場合は bootloader が次回起動で自動ロールバック。
+
+ランタイム設定は NVS 名前空間 `"ota"`:
+
+| キー | 型 | 既定値 | 意味 |
+|---|---|---|---|
+| `auto` | u8 | `1` (`CONFIG_TAB5_OTA_ENABLED` に追従) | 自動更新の ON/OFF |
+| `base_url` | str | (空 = Kconfig 値) | ポーリング先の基底 URL |
+| `pinned_tag` | str | (空) | 指定 tag のみ受け入れる |
+| `rollback_cnt` | u32 | 0 | 累積ロールバック回数 |
+
+詳細な設計 / 脅威モデルは
+[docs/OTA_UPDATE_DESIGN.md](docs/OTA_UPDATE_DESIGN.md) を参照。
+
 ## Tailscale NAT 越え
 
 プロトコル詳細は [docs/TAILSCALE_PORTING_NOTES.md](docs/TAILSCALE_PORTING_NOTES.md)

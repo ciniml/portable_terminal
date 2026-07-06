@@ -224,4 +224,37 @@ menu "Tab5 terminal"
 
     endmenu
 
+    menu "OTA update"
+
+        config TAB5_OTA_ENABLED
+            bool "Enable OTA update client"
+            default y
+            help
+                Periodically poll a `latest.json` manifest over HTTPS
+                and install newer app images via esp_https_ota.
+                Runtime auto-poll gate is the NVS key "ota.auto"
+                (default: this Kconfig value). See
+                docs/OTA_UPDATE_DESIGN.md.
+
+        config TAB5_OTA_LATEST_URL
+            string "Base URL for latest.json polling"
+            depends on TAB5_OTA_ENABLED
+            default "https://ciniml.github.io/tab5_claude_client/"
+            help
+                URL of the directory that hosts latest.json. The client
+                appends "latest.json" itself. Overridable at runtime via
+                NVS "ota.base_url".
+
+        config TAB5_OTA_POLL_INTERVAL_H
+            int "Poll interval (hours)"
+            depends on TAB5_OTA_ENABLED
+            default 6
+            range 1 168
+            help
+                Interval between latest.json checks. A ±15 min jitter
+                (seeded from the STA MAC low bytes) is applied so a
+                fleet doesn't converge on the same tick.
+
+    endmenu
+
 endmenu

@@ -491,3 +491,58 @@ Modal menu 側 (`main/menu.cpp`) にも "Firmware" タブを追加して:
 以上は別 PR で段階的に実装する前提。まずはこの設計に対する
 レビュー / 合意を経てから、`ota_task` の骨組みだけを入れる
 小さな最初の PR を作るのが自然な段取り。
+
+---
+
+## 6. Implementation notes (2026-07)
+
+このリビジョンで `main/ota_task.{hpp,cpp}` を実装した。実装上、
+設計案から意図的にずらした / 保留した部分:
+
+- **API 名は `tab5::ota::start/kick/snapshot`** に統一。`Trigger::Auto`
+  / `Trigger::Manual` を Enum で切り分ける形にし、`OtaStatus` 相当の
+  `Status` 構造体を `snapshot()` から返す。
+- **NVS 名前空間 = `"ota"`**、キーは `auto` / `base_url` / `pinned_tag` /
+  `rollback_cnt`。§2.6 の表にあった `channel` / `url_base` / `pubkey` /
+  `last_check_ts` / `last_fail_count` は未実装 (channel = GitHub Pages
+  固定 + backoff/streak はプロセス内 atomic で保持 — 電源断で失敗回数が
+  0 に戻る挙動を許容している)。
+- **channel 分岐 (§3.1 の `ota_channel.hpp/cpp`) は未実装**。設計時点
+  では pages / releases / tailscale の切替を持たせる想定だったが、URL
+  1 本 + `base_url` overrides で足りるので簡素化。
+- **§2.3 の「brownout / 電池 20% ガード」「network flap ガード」は未実装**
+  (先送り)。Wi-Fi が落ちた状態で `esp_https_ota_begin` が失敗すると
+  streak が上がり指数バックオフに入るのでソフトには守れている。
+- **`is_complete_data_received` を `esp_https_ota_finish` の前に呼び、
+  途中打ち切りを検出**。設計案では明示していなかった。
+- **署名検証は入れていない** (§2.3 のとおり Phase 2)。TLS + repo 所有者
+  信頼で運用。`sha256` は `latest.json` から読み込みは出来ているが、
+  ダウンロード側でオンザフライ検証は入れていない (esp_https_ota が
+  chip_id / project_name / secure_version の検証を回している)。
+- **§2.4 の rollback 呼び出し条件を単純化**: 現在は「起動から 120 秒
+  経過」だけを条件に `esp_ota_mark_app_valid_cancel_rollback` を呼ぶ。
+  「Wi-Fi 接続 + VPN 有効」を条件に含めると、更新後に Wi-Fi 圏外に
+  出た端末がロールバックで戻ってしまい "更新済みだが reachable でない"
+  状態が固定化しかねないため、意図的に緩めた。
+- **§2.4 の手動 rollback (`esp_ota_mark_app_invalid_rollback_and_reboot`)
+  は未実装** (menu 未対応と対)。
+- **Deferred reboot の判断は `active_connection()` の有無で行う**。
+  §4.2 の「直近 30 秒 send/recv 0 byte」相当の idle 判定は `IConnection`
+  に API が無いので次のリファクタで足す (`RebootReadyFn` を差し替える口
+  だけ用意した)。
+- **menu 統合 (§3.2 の "Firmware" タブ) は未実装**。`main/menu.cpp` の
+  タブは変更していない。手動 `kick(Manual)` / rollback / channel select
+  等の UI は BLE 設定サービス側に寄せるか、menu の後続 PR で入れる。
+- **CI (§3.3)**:
+  - `release.yml` は `release/tab5_claude_client.bin` + `release/latest.json`
+    をリリースアセットとして直接添付する形にした (ZIP は既存 Web Flasher
+    互換のためそのまま残す)。
+  - `pages.yml` は各 tag の raw アプリバイナリと `latest.json` を
+    `_site/firmware/<tag>/` に staging し、非 prerelease で最新の tag の
+    `latest.json` を `_site/latest.json` にコピーする。canary /
+    promote-latest ワークフローは未実装 (§3.3 step 4)。
+- **`sdkconfig.defaults`** に `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` /
+  `CONFIG_ESP_HTTPS_OTA_ENABLE_PARTIAL_DOWNLOAD=y` を追加。
+- **Kconfig** は `TAB5_OTA_ENABLED` / `TAB5_OTA_LATEST_URL` /
+  `TAB5_OTA_POLL_INTERVAL_H` の 3 項目のみ (§3.2 の
+  `TAB5_OTA_HEALTHY_DELAY_S` などは定数化した)。
