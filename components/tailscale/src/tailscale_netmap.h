@@ -85,3 +85,20 @@ bool ts_netmap_get_derp_region(int region_id, ts_derp_node_t *out);
 bool ts_netmap_lookup_by_disco(const uint8_t disco_pub[32],
                                 uint8_t *wg_idx_out,
                                 uint8_t  node_pub_out[32]);
+
+/**
+ * @brief Look up a peer by its WG peer index.
+ *
+ * Reverse of ts_netmap_lookup_by_disco. Used by DISCO's periodic
+ * re-verify sweep to build a heartbeat Ping for a verified peer
+ * (needs the peer's NodeKey + DISCO Curve25519 pubkey to seal the
+ * DISCO frame, but only had the wg_index in the s_verified slot).
+ *
+ * @param wg_idx         WG peer index.
+ * @param node_pub_out   On hit, receives the peer's 32-byte NodeKey.
+ * @param disco_pub_out  On hit, receives the peer's 32-byte DISCO key.
+ * @return true on hit, false on miss.
+ */
+bool ts_netmap_get_peer_by_wg_idx(uint8_t wg_idx,
+                                   uint8_t node_pub_out[32],
+                                   uint8_t disco_pub_out[32]);

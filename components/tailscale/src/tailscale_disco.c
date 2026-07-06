@@ -88,6 +88,12 @@ static bool            s_verified[DISCO_VERIFIED_MAX];
  * side roaming to a new address, or any other silent-failure of the
  * previously-verified endpoint. */
 static int64_t         s_last_pong_ts[DISCO_VERIFIED_MAX];
+/* Verified endpoint per WG peer — the (ip, port) we captured from the
+ * Pong that promoted the peer to direct. The sweep uses this to send a
+ * heartbeat Ping when the peer has gone silent for a while (so we can
+ * detect direct-path failure BEFORE the stale window fully expires). */
+typedef struct { ip_addr_t ip; uint16_t port; } disco_endpoint_t;
+static disco_endpoint_t s_verified_ep[DISCO_VERIFIED_MAX];
 
 /* Rate-limit: at most one outbound CallMeMaybe per WG peer per 30 s.
  * Indexed by wg_peer_index. esp_timer_get_time() is microseconds since boot. */
@@ -95,14 +101,22 @@ static int64_t         s_last_pong_ts[DISCO_VERIFIED_MAX];
 #define DISCO_CALL_ME_MAYBE_INTERVAL_US (30LL * 1000LL * 1000LL)
 static int64_t         s_last_call_me_maybe_ts[DISCO_PEERS_MAX];
 
-/* Watchdog: sweep every 60 s. If a verified peer hasn't seen a Pong (or
- * initial Pong verification) in ~5 min, drop verification so the next
- * netmap_apply can re-probe. Values chosen to sit comfortably above the
- * WG 25 s keepalive interval (which itself keeps NAT mappings warm and
- * would normally cause DISCO chatter as a side effect on any surviving
- * direct path). Longer window than #1 to avoid unnecessary flapping. */
-#define DISCO_REVERIFY_SWEEP_US  (60LL * 1000LL * 1000LL)
-#define DISCO_REVERIFY_STALE_US  (5LL * 60LL * 1000LL * 1000LL)
+/* Two-tier liveness sweep, every 60 s:
+ *   ACTIVE_PROBE_US:  send a heartbeat Ping to the verified endpoint;
+ *                     if a Pong comes back it refreshes s_last_pong_ts
+ *                     without any teardown. Handles the common case of
+ *                     "peer wasn't chatty for a bit but the path is fine".
+ *   STALE_US:         no Pong in this long — direct path is presumed
+ *                     dead, drop verification so netmap apply falls back
+ *                     to DERP pseudo and re-probes.
+ * A peer-initiated Ping arriving over the direct path also refreshes
+ * s_last_pong_ts (see ts_disco_rx PING branch), so a peer that probes us
+ * periodically effectively keeps its own verified state alive without
+ * any traffic from our side. Values sized to tolerate multi-second RTT
+ * spikes and the occasional dropped probe on flaky networks. */
+#define DISCO_REVERIFY_SWEEP_US   (60LL * 1000LL * 1000LL)
+#define DISCO_REVERIFY_ACTIVE_US  (3LL * 60LL * 1000LL * 1000LL)
+#define DISCO_REVERIFY_STALE_US   (15LL * 60LL * 1000LL * 1000LL)
 static esp_timer_handle_t s_reverify_timer = NULL;
 static void reverify_sweep_cb(void *arg);
 
@@ -202,21 +216,43 @@ static void reverify_sweep_cb(void *arg)
     if (!s_inited) return;
     int64_t now = esp_timer_get_time();
     int cleared = 0;
+    int probed  = 0;
     for (int i = 0; i < DISCO_VERIFIED_MAX; i++) {
         if (!s_verified[i]) continue;
         int64_t age = now - s_last_pong_ts[i];
+
         if (age > DISCO_REVERIFY_STALE_US) {
+            /* Really gone. Drop verification and let netmap apply
+             * fall back to DERP + re-probe. */
             s_verified[i] = false;
             s_last_pong_ts[i] = 0;
-            /* Also clear the CallMeMaybe rate-limit so the next netmap
-             * apply is free to re-invite the peer. */
             if (i < DISCO_PEERS_MAX) s_last_call_me_maybe_ts[i] = 0;
             cleared++;
+            continue;
+        }
+
+        if (age > DISCO_REVERIFY_ACTIVE_US) {
+            /* Might be gone, might just be quiet. Send a heartbeat
+             * Ping to the last known direct endpoint; a Pong from the
+             * peer will refresh s_last_pong_ts and keep verification
+             * alive. No Pong before the stale window expires → we drop
+             * verification on a later sweep tick. */
+            uint8_t peer_node_pub[32];
+            uint8_t peer_disco_pub[32];
+            if (!ts_netmap_get_peer_by_wg_idx((uint8_t)i,
+                                              peer_node_pub,
+                                              peer_disco_pub)) {
+                continue;
+            }
+            if (ts_disco_send_ping((uint8_t)i, peer_node_pub, peer_disco_pub,
+                                   &s_verified_ep[i].ip,
+                                   s_verified_ep[i].port) == ESP_OK) {
+                probed++;
+            }
         }
     }
-    if (cleared > 0) {
-        ESP_LOGI(TAG, "re-verify: cleared %d stale peer(s); next netmap apply will re-probe",
-                 cleared);
+    if (cleared > 0 || probed > 0) {
+        ESP_LOGI(TAG, "re-verify: cleared=%d probed=%d", cleared, probed);
     }
 }
 
@@ -229,6 +265,7 @@ void ts_disco_reset_peer(uint8_t wg_peer_index)
     if (wg_peer_index < DISCO_VERIFIED_MAX) {
         s_verified[wg_peer_index] = false;
         s_last_pong_ts[wg_peer_index] = 0;
+        memset(&s_verified_ep[wg_peer_index], 0, sizeof(s_verified_ep[0]));
     }
     if (wg_peer_index < DISCO_PEERS_MAX) {
         s_last_call_me_maybe_ts[wg_peer_index] = 0;
@@ -253,6 +290,7 @@ esp_err_t ts_disco_init(const uint8_t disco_priv[32],
     memset(s_pending,    0, sizeof(s_pending));
     memset(s_verified,   0, sizeof(s_verified));
     memset(s_last_pong_ts, 0, sizeof(s_last_pong_ts));
+    memset(s_verified_ep, 0, sizeof(s_verified_ep));
     memset(s_last_call_me_maybe_ts, 0, sizeof(s_last_call_me_maybe_ts));
     s_inited = true;
 
@@ -527,6 +565,30 @@ static void ts_disco_rx(const uint8_t *data, size_t len,
                  (unsigned)ip_2_ip4(src_ip)->addr, (unsigned)src_port,
                  tx_id[0], tx_id[1], tx_id[2], tx_id[3]);
         send_pong(sender_pub, tx_id, src_ip, src_port);
+        /* If the Ping arrived over the peer's direct path (i.e. not the
+         * DERP pseudo 127.3.3.0/24), it's ALSO proof that the direct
+         * path is bidirectionally alive right now — refresh the
+         * liveness clock so the sweep doesn't tear down verification
+         * just because we didn't ping the peer ourselves. Official
+         * Tailscale clients probe periodically (~ every couple of
+         * minutes on active paths), so this alone typically keeps a
+         * healthy verified peer verified indefinitely. */
+        if (IP_IS_V4(src_ip)) {
+            uint32_t a_be = ip_2_ip4(src_ip)->addr;
+            /* 127.3.3.0/24 = DERP pseudo. Network-order representation
+             * of 127.3.3.0 is 0x0003037F (LE host). */
+            bool is_derp_pseudo = ((a_be & PP_HTONL(0xFFFFFF00u))
+                                   == PP_HTONL(0x7F030300u));
+            if (!is_derp_pseudo) {
+                uint8_t wg_idx;
+                uint8_t peer_node_pub[32];
+                if (ts_netmap_lookup_by_disco(sender_pub, &wg_idx,
+                                              peer_node_pub) &&
+                    wg_idx < DISCO_VERIFIED_MAX && s_verified[wg_idx]) {
+                    s_last_pong_ts[wg_idx] = esp_timer_get_time();
+                }
+            }
+        }
         break;
     }
     case DISCO_MSG_PONG: {
@@ -561,6 +623,8 @@ static void ts_disco_rx(const uint8_t *data, size_t len,
         if (wg_idx < DISCO_VERIFIED_MAX) {
             s_verified[wg_idx] = true;
             s_last_pong_ts[wg_idx] = esp_timer_get_time();
+            s_verified_ep[wg_idx].ip   = *src_ip;
+            s_verified_ep[wg_idx].port = src_port;
         }
 
         ESP_LOGI(TAG, "Pong recv from %u.%u.%u.%u:%u → peer %u direct",

@@ -889,3 +889,17 @@ bool ts_netmap_lookup_by_disco(const uint8_t disco_pub[32],
     }
     return false;
 }
+
+bool ts_netmap_get_peer_by_wg_idx(uint8_t wg_idx,
+                                   uint8_t node_pub_out[32],
+                                   uint8_t disco_pub_out[32])
+{
+    for (int i = 0; i < TS_NETMAP_MAX_PEERS; i++) {
+        if (!s_peers[i].active) continue;
+        if (s_peers[i].wg_index != wg_idx) continue;
+        if (node_pub_out)  memcpy(node_pub_out,  s_peers[i].node_pub,  32);
+        if (disco_pub_out) memcpy(disco_pub_out, s_peers[i].disco_pub, 32);
+        return true;
+    }
+    return false;
+}
