@@ -14,6 +14,12 @@ if(CONFIG_TAB5_SSH_PUBKEY_AUTH)
     list(APPEND _embed_txtfiles "keys/id_rsa")
 endif()
 
+if(CONFIG_TAB5_HTTP_CONFIG_ENABLED)
+    # Settings landing page served at GET /. TXTFILES appends a NUL so
+    # the handler can treat the blob as a C string.
+    list(APPEND _embed_txtfiles "http_config_page.html")
+endif()
+
 idf_component_register(
     SRCS
         "app_main.cpp"
@@ -22,6 +28,7 @@ idf_component_register(
         "cursor_renderer.cpp"
         "display_m5gfx.cpp"
         "hid_translate.cpp"
+        "http_config.cpp"
         "input_tab5_kbd.cpp"
         "input_usb_jtag.cpp"
         "input_uart.cpp"
@@ -60,6 +67,7 @@ idf_component_register(
         lwip
         app_update
         esp_http_client
+        esp_http_server
         esp_https_ota
         espressif__cjson
         espressif__usb

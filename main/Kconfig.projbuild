@@ -224,6 +224,41 @@ menu "Tab5 terminal"
 
     endmenu
 
+    menu "HTTP config service"
+
+        config TAB5_HTTP_CONFIG_ENABLED
+            bool "Enable HTTP settings service (softAP)"
+            default y
+            help
+                Brings up a softAP ("Tab5-XXXXXX") alongside the STA
+                connection and serves a settings page at
+                http://192.168.4.1/. Phase 1 exposes firmware info
+                read-only; config writes come later.
+
+        config TAB5_HTTP_CONFIG_AP_PSK
+            string "softAP WPA2 passphrase (empty = open)"
+            depends on TAB5_HTTP_CONFIG_ENABLED
+            default ""
+            help
+                WPA2-PSK passphrase for the settings softAP. Must be
+                8-63 characters; an empty string means an open
+                (unencrypted) AP. A non-empty value shorter than 8
+                characters is rejected at runtime and falls back to
+                an open AP with an error log.
+
+        config TAB5_HTTP_CONFIG_AP_CHANNEL
+            int "softAP channel"
+            depends on TAB5_HTTP_CONFIG_ENABLED
+            default 1
+            range 1 13
+            help
+                Wi-Fi channel for the settings softAP. Note: on the
+                ESP32 family, APSTA mode forces the AP onto the STA's
+                channel whenever the STA is associated — this setting
+                only takes effect while the STA is disconnected.
+
+    endmenu
+
     menu "OTA update"
 
         config TAB5_OTA_ENABLED

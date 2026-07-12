@@ -40,6 +40,9 @@
 #include "wifi_config.hpp"
 #include "wifi_setup.hpp"
 #endif
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+#include "http_config.hpp"
+#endif
 #include "vpn.hpp"
 #include "connection.hpp"
 #include "profiles.hpp"
@@ -163,6 +166,25 @@ void do_boot_sequence(const BootDeps& d) {
         d.term_write(line);
 
         auto rc = tab5::wifi_sta_connect(wc.ssid, wc.psk, wc.timeout_s);
+
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+        // Bring up the HTTP settings service (softAP + esp_http_server)
+        // right after the STA attempt, whether or not it associated —
+        // reaching the settings page matters most when STA credentials
+        // are wrong. esp_wifi_init has run by this point either way.
+        // Failure is non-fatal.
+        if (esp_err_t herr = tab5::http_config::start(); herr != ESP_OK) {
+            ESP_LOGW(kTag, "HTTP config service start failed: %s",
+                     esp_err_to_name(herr));
+        } else {
+            std::snprintf(line, sizeof(line),
+                          "\x1b[2mConfig AP \"%s\"  http://192.168.4.1/"
+                          "\x1b[0m\r\n",
+                          tab5::http_config::ap_ssid());
+            d.term_write(line);
+        }
+#endif
+
         if (tab5::boot_progress::cancel_requested()) {
             tab5::boot_progress::set(Stage::Cancelled, "wifi");
             d.term_write("\x1b[33mWi-Fi connect cancelled\x1b[0m\r\n\r\n"sv);

@@ -1,0 +1,132 @@
+<!--
+SPDX-FileCopyrightText: 2026 Kenta IDA <fuga@fugafuga.org>
+SPDX-License-Identifier: BSL-1.0
+-->
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab5 設定</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Hiragino Sans",
+                 "Noto Sans CJK JP", sans-serif;
+    max-width: 40rem;
+    margin: 0 auto;
+    padding: 1rem;
+    line-height: 1.6;
+  }
+  h1 { font-size: 1.4rem; border-bottom: 1px solid #8884; padding-bottom: .4rem; }
+  h2 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td {
+    text-align: left;
+    padding: .3rem .6rem;
+    border-bottom: 1px solid #8883;
+    font-size: .95rem;
+  }
+  th { width: 40%; font-weight: 600; white-space: nowrap; }
+  td { font-family: ui-monospace, "SF Mono", Consolas, monospace; word-break: break-all; }
+  .ok { color: #2a2; }
+  .ng { color: #c33; }
+  .note {
+    margin-top: 1.6rem;
+    padding: .7rem .9rem;
+    border: 1px solid #8885;
+    border-radius: .5rem;
+    font-size: .9rem;
+    opacity: .85;
+  }
+  #err { color: #c33; font-size: .9rem; min-height: 1.2rem; }
+  footer { margin-top: 1.5rem; font-size: .8rem; opacity: .6; }
+</style>
+</head>
+<body>
+<h1>Tab5 設定</h1>
+<p id="err"></p>
+
+<h2>ファームウェア情報</h2>
+<table>
+  <tr><th>プロジェクト</th>      <td id="project">—</td></tr>
+  <tr><th>バージョン</th>        <td id="version">—</td></tr>
+  <tr><th>ESP-IDF</th>           <td id="idf">—</td></tr>
+  <tr><th>ビルド日時</th>        <td id="built">—</td></tr>
+  <tr><th>ELF SHA-256</th>       <td id="sha256">—</td></tr>
+  <tr><th>チップ</th>            <td id="chip">—</td></tr>
+  <tr><th>稼働時間</th>          <td id="uptime">—</td></tr>
+  <tr><th>空きヒープ</th>        <td id="heap">—</td></tr>
+</table>
+
+<h2>ネットワーク</h2>
+<table>
+  <tr><th>Wi-Fi (STA)</th>       <td id="sta">—</td></tr>
+  <tr><th>Tailscale</th>         <td id="ts">—</td></tr>
+  <tr><th>OTA</th>               <td id="ota">—</td></tr>
+</table>
+
+<div class="note">
+  設定書き込み機能（Wi-Fi 認証情報・接続プロファイル・Tailscale
+  認証キーの設定）は今後追加予定です。現在はファームウェア情報の
+  表示のみに対応しています。
+</div>
+
+<footer>5 秒ごとに自動更新 — <span id="updated">未取得</span></footer>
+
+<script>
+"use strict";
+function txt(id, v) { document.getElementById(id).textContent = v; }
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600),
+        m = Math.floor(s % 3600 / 60), sec = s % 60;
+  return (d ? d + "d " : "") + h + "h " + m + "m " + sec + "s";
+}
+async function refresh() {
+  try {
+    const r = await fetch("/api/info");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    txt("project", j.project || "—");
+    txt("version", j.version || "—");
+    txt("idf", j.idf || "—");
+    txt("built", (j.compile_date || "") + " " + (j.compile_time || ""));
+    txt("sha256", j.sha256 || "—");
+    txt("chip", j.chip || "—");
+    txt("uptime", fmtUptime(j.uptime_s || 0));
+    txt("heap", (j.heap_free || 0).toLocaleString() + " bytes");
+
+    const sta = j.sta || {};
+    const staEl = document.getElementById("sta");
+    staEl.textContent = sta.connected
+      ? "接続中 " + (sta.ssid || "") + " (" + (sta.ip || "?") + ")"
+      : "未接続" + (sta.ssid ? " (" + sta.ssid + ")" : "");
+    staEl.className = sta.connected ? "ok" : "ng";
+
+    const ts = j.tailscale;
+    const tsEl = document.getElementById("ts");
+    if (ts) {
+      tsEl.textContent = ts.up ? "接続中 " + (ts.ip || "") : "未接続";
+      tsEl.className = ts.up ? "ok" : "ng";
+    } else {
+      tsEl.textContent = "無効";
+      tsEl.className = "";
+    }
+
+    const ota = j.ota;
+    txt("ota", ota
+      ? ota.phase + " (現行 " + (ota.current || "?") +
+        (ota.target ? " → " + ota.target : "") + ")"
+      : "無効");
+
+    txt("updated", new Date().toLocaleTimeString());
+    txt("err", "");
+  } catch (e) {
+    txt("err", "取得失敗: " + e.message);
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
