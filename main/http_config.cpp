@@ -1,15 +1,29 @@
 // SPDX-FileCopyrightText: 2026 Kenta IDA <fuga@fugafuga.org>
 // SPDX-License-Identifier: BSL-1.0
 //
-// HTTP configuration service, phase 1.
+// HTTP configuration service, phase 2b.
 //
 // SoftAP + esp_http_server. Routes:
-//   GET /          — settings landing page (embedded http_config_page.html)
-//   GET /api/info  — firmware / network status as JSON
+//   GET  /              — settings landing page (embedded http_config_page.html)
+//   GET  /api/info      — firmware / network status + stored config as JSON
+//   POST /api/wifi      — store STA credentials     (NVS via wifi_config)
+//   POST /api/profile   — store connection profile 0 (NVS via profiles)
+//   POST /api/tailscale — store Tailscale auth key / hostname (NVS "tailscale")
+//   POST /api/reboot    — deferred esp_restart()
 //
-// Phase-2 write endpoints (Wi-Fi credentials, connection profiles,
-// Tailscale auth key) will land under /api/ as POSTs — keep new reads
-// under /api/ too so the page stays a static shell over a JSON API.
+// Write-endpoint contract (also mirrored by the settings page JS):
+//   * Bodies are JSON, capped at 1 KB; anything else is rejected.
+//   * Writes only touch NVS — nothing reconnects in-line. Responses carry
+//     "reboot_required": true and the page offers the reboot button.
+//   * Secrets are never echoed back; /api/info only reports *_set flags.
+//   * Empty-secret semantics differ per endpoint (documented at each
+//     handler): /api/wifi requires ssid+psk every time (open networks
+//     need an explicit "open": true), while /api/profile ("password")
+//     and /api/tailscale ("auth_key" / "hostname") treat empty or absent
+//     fields as "keep the stored value".
+//
+// Security model: the service is only reachable over the WPA2-protected
+// softAP or the trusted STA LAN — no additional auth layer in this phase.
 #include "http_config.hpp"
 
 #include "sdkconfig.h"
@@ -32,6 +46,8 @@
 #include "nvs.h"
 
 #include "captive_portal.hpp"
+#include "profiles.hpp"
+#include "wifi_config.hpp"
 #include "wifi_setup.hpp"
 
 #if CONFIG_TAB5_OTA_ENABLED
@@ -184,6 +200,46 @@ esp_err_t handle_api_info(httpd_req_t* req) {
         cJSON_AddBoolToObject(ap, "psk_set", std::strlen(g_psk) >= 8);
     }
 
+    // Stored configuration for form prefill. Secrets themselves are
+    // NEVER included — only *_set booleans.
+    {
+        cJSON* w = cJSON_AddObjectToObject(root, "wifi");
+        auto wc = tab5::wifi_config::get();
+        cJSON_AddStringToObject(w, "ssid", wc.ssid);
+        cJSON_AddBoolToObject(w, "psk_set", wc.psk[0] != '\0');
+    }
+
+    {
+        cJSON* pr = cJSON_AddObjectToObject(root, "profile");
+        if (auto p = tab5::profiles.get(0)) {
+            cJSON_AddStringToObject(
+                pr, "proto",
+                p->proto == tab5::ConnProto::SSH      ? "ssh" :
+                p->proto == tab5::ConnProto::Telnet   ? "telnet" : "usb");
+            cJSON_AddStringToObject(pr, "host", p->host);
+            cJSON_AddNumberToObject(pr, "port", p->port);
+            cJSON_AddStringToObject(pr, "user", p->user);
+            cJSON_AddBoolToObject(pr, "password_set", p->password[0] != '\0');
+        }
+    }
+
+    {
+        cJSON* ts = cJSON_AddObjectToObject(root, "ts_cfg");
+        char hostname[64] = {};
+        bool key_set = false;
+        nvs_handle_t nvs = 0;
+        if (nvs_open("tailscale", NVS_READONLY, &nvs) == ESP_OK) {
+            size_t len = sizeof(hostname);
+            (void)nvs_get_str(nvs, "hostname", hostname, &len);
+            len = 0;  // size query only — never load the key itself
+            key_set = nvs_get_str(nvs, "auth_key", nullptr, &len) == ESP_OK &&
+                      len > 1;
+            nvs_close(nvs);
+        }
+        cJSON_AddStringToObject(ts, "hostname", hostname);
+        cJSON_AddBoolToObject(ts, "auth_key_set", key_set);
+    }
+
 #if CONFIG_TAB5_OTA_ENABLED
     {
         cJSON* ota = cJSON_AddObjectToObject(root, "ota");
@@ -218,6 +274,285 @@ esp_err_t handle_api_info(httpd_req_t* req) {
     return err;
 }
 
+// ---- Write API ----------------------------------------------------------
+
+// JSON POST plumbing shared by the /api/ write handlers.
+
+constexpr size_t kMaxBodyLen = 1024;  // Content-Length cap for POST bodies
+
+esp_err_t send_json_error(httpd_req_t* req, const char* status,
+                          const char* msg) {
+    char body[128];
+    std::snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"%s\"}", msg);
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, body);
+    return ESP_OK;  // handled — don't let httpd close with its own error
+}
+
+esp_err_t send_json_ok(httpd_req_t* req, bool reboot_required) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, reboot_required
+                                ? "{\"ok\":true,\"reboot_required\":true}"
+                                : "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// Read the request body (<= kMaxBodyLen) and parse it as JSON. On any
+// failure an error response has already been sent and nullptr is
+// returned. Caller owns the returned cJSON.
+cJSON* read_json_body(httpd_req_t* req, esp_err_t* out_err) {
+    if (req->content_len > kMaxBodyLen) {
+        *out_err = send_json_error(req, "413 Payload Too Large", "body too large");
+        return nullptr;
+    }
+    char buf[kMaxBodyLen + 1];
+    size_t total = 0;
+    while (total < req->content_len) {
+        int n = httpd_req_recv(req, buf + total, req->content_len - total);
+        if (n <= 0) {
+            *out_err = send_json_error(req, "400 Bad Request", "recv failed");
+            return nullptr;
+        }
+        total += static_cast<size_t>(n);
+    }
+    buf[total] = '\0';
+    cJSON* root = cJSON_ParseWithLength(buf, total);
+    if (!root || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        *out_err = send_json_error(req, "400 Bad Request", "invalid JSON");
+        return nullptr;
+    }
+    *out_err = ESP_OK;
+    return root;
+}
+
+// Fetch a string field. Returns nullptr when absent or not a string;
+// use json_str_or() when absent should read as "".
+const char* json_str(const cJSON* root, const char* key) {
+    const cJSON* it = cJSON_GetObjectItemCaseSensitive(root, key);
+    return cJSON_IsString(it) ? it->valuestring : nullptr;
+}
+
+const char* json_str_or(const cJSON* root, const char* key,
+                        const char* fallback) {
+    const char* s = json_str(root, key);
+    return s ? s : fallback;
+}
+
+// POST /api/wifi  {"ssid":"...","psk":"...","open":bool?}
+//
+// Contract: ssid AND psk are required on EVERY submit (there is no
+// "keep stored psk" shortcut here — a wrong stored psk is exactly the
+// case this endpoint must fix, so silently keeping it is a footgun).
+// An empty psk is only accepted together with an explicit "open": true
+// (open network). ssid must be 1..32 bytes; a non-empty psk 8..63.
+// NVS write only — no in-line reconnect; takes effect on reboot.
+esp_err_t handle_api_wifi(httpd_req_t* req) {
+    esp_err_t err;
+    cJSON* root = read_json_body(req, &err);
+    if (!root) return err;
+
+    const char* ssid = json_str(root, "ssid");
+    const char* psk  = json_str(root, "psk");
+    const cJSON* open_it = cJSON_GetObjectItemCaseSensitive(root, "open");
+    const bool open_net = cJSON_IsTrue(open_it);
+
+    if (!ssid || !psk) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "ssid and psk required");
+    }
+    const size_t ssid_len = std::strlen(ssid);
+    const size_t psk_len  = std::strlen(psk);
+    if (ssid_len < 1 || ssid_len > 32) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "ssid must be 1-32 bytes");
+    }
+    if (psk_len == 0 && !open_net) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request",
+                               "empty psk requires open:true");
+    }
+    if (psk_len != 0 && (psk_len < 8 || psk_len > 63)) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "psk must be 8-63 bytes");
+    }
+
+    auto cfg = tab5::wifi_config::get();  // keep the stored timeout_s
+    std::memset(cfg.ssid, 0, sizeof(cfg.ssid));
+    std::memset(cfg.psk, 0, sizeof(cfg.psk));
+    std::memcpy(cfg.ssid, ssid, ssid_len);
+    std::memcpy(cfg.psk, psk, psk_len);
+    cJSON_Delete(root);
+
+    if (!tab5::wifi_config::set(cfg)) {
+        return send_json_error(req, "500 Internal Server Error", "NVS write failed");
+    }
+    ESP_LOGI(kTag, "stored Wi-Fi credentials for '%s' (reboot to apply)",
+             cfg.ssid);
+    return send_json_ok(req, /*reboot_required=*/true);
+}
+
+// POST /api/tailscale  {"auth_key":"...","hostname":"..."}
+//
+// Contract: both fields optional; an empty or absent field keeps the
+// stored value (the page prefills hostname and leaves auth_key blank
+// with an "(unchanged)" placeholder). A non-empty auth_key must start
+// with "tskey-". Written straight to NVS namespace "tailscale" — the
+// same keys components/tailscale reads at start — so it applies on the
+// next reboot.
+esp_err_t handle_api_tailscale(httpd_req_t* req) {
+    esp_err_t err;
+    cJSON* root = read_json_body(req, &err);
+    if (!root) return err;
+
+    const char* auth_key = json_str_or(root, "auth_key", "");
+    const char* hostname = json_str_or(root, "hostname", "");
+
+    if (auth_key[0] && std::strncmp(auth_key, "tskey-", 6) != 0) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request",
+                               "auth_key must start with tskey-");
+    }
+    // Size limits from components/tailscale (s_auth_key[128], s_hostname[64]).
+    if (std::strlen(auth_key) > 127 || std::strlen(hostname) > 63) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "field too long");
+    }
+
+    nvs_handle_t nvs = 0;
+    esp_err_t nerr = nvs_open("tailscale", NVS_READWRITE, &nvs);
+    if (nerr == ESP_OK) {
+        if (auth_key[0]) nerr = nvs_set_str(nvs, "auth_key", auth_key);
+        if (nerr == ESP_OK && hostname[0]) {
+            nerr = nvs_set_str(nvs, "hostname", hostname);
+        }
+        if (nerr == ESP_OK) nerr = nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+    cJSON_Delete(root);
+    if (nerr != ESP_OK) {
+        return send_json_error(req, "500 Internal Server Error", "NVS write failed");
+    }
+    ESP_LOGI(kTag, "stored Tailscale config (reboot to apply)");
+    return send_json_ok(req, /*reboot_required=*/true);
+}
+
+// POST /api/profile
+//   {"proto":"ssh"|"telnet","host":"...","port":22,"user":"...","password":"..."}
+//
+// Updates connection profile 0 (the auto-connect slot); creates it when
+// the store is empty. Contract: proto and host are required; port
+// defaults to 22 (ssh) / 23 (telnet); an empty or absent password keeps
+// profile 0's stored password AND its auth mode (so a host-only edit
+// does not clobber a pubkey setup — the key itself stays
+// firmware-embedded). A non-empty password switches auth to
+// SshAuth::Password. The display name is auto-derived ("proto:host",
+// truncated), matching the Kconfig seed convention.
+esp_err_t handle_api_profile(httpd_req_t* req) {
+    esp_err_t err;
+    cJSON* root = read_json_body(req, &err);
+    if (!root) return err;
+
+    const char* proto = json_str_or(root, "proto", "");
+    const char* host  = json_str_or(root, "host", "");
+    const char* user  = json_str_or(root, "user", "");
+    const char* pass  = json_str_or(root, "password", "");
+    const cJSON* port_it = cJSON_GetObjectItemCaseSensitive(root, "port");
+
+    tab5::ConnProto p_proto;
+    if (std::strcmp(proto, "ssh") == 0) {
+        p_proto = tab5::ConnProto::SSH;
+    } else if (std::strcmp(proto, "telnet") == 0) {
+        p_proto = tab5::ConnProto::Telnet;
+    } else {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request",
+                               "proto must be ssh or telnet");
+    }
+    const size_t host_len = std::strlen(host);
+    if (host_len < 1 || host_len > 63) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "host must be 1-63 bytes");
+    }
+    int port = cJSON_IsNumber(port_it)
+                   ? port_it->valueint
+                   : (p_proto == tab5::ConnProto::SSH ? 22 : 23);
+    if (port < 1 || port > 65535) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "port must be 1-65535");
+    }
+    if (std::strlen(user) > 31 || std::strlen(pass) > 63) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "field too long");
+    }
+
+    tab5::Profile np{};
+    np.proto = p_proto;
+    np.port  = static_cast<uint16_t>(port);
+    std::strncpy(np.host, host, sizeof(np.host) - 1);
+    std::strncpy(np.user, user, sizeof(np.user) - 1);
+    std::snprintf(np.name, sizeof(np.name), "%s:%.20s",
+                  p_proto == tab5::ConnProto::SSH ? "ssh" : "telnet", host);
+    np.auth = tab5::SshAuth::Password;
+    if (pass[0]) {
+        std::strncpy(np.password, pass, sizeof(np.password) - 1);
+    } else if (auto prev = tab5::profiles.get(0)) {
+        // Empty password = keep the stored secret and auth mode.
+        std::memcpy(np.password, prev->password, sizeof(np.password));
+        np.auth = prev->auth;
+    }
+    cJSON_Delete(root);
+
+    bool ok = tab5::profiles.count() > 0 ? tab5::profiles.update(0, np)
+                                         : tab5::profiles.add(np) == 0;
+    if (!ok) {
+        return send_json_error(req, "500 Internal Server Error", "NVS write failed");
+    }
+    ESP_LOGI(kTag, "stored profile 0: %s (reboot to apply)", np.name);
+    return send_json_ok(req, /*reboot_required=*/true);
+}
+
+// POST /api/reboot — reply {"ok":true} first, restart ~500 ms later on
+// an esp_timer so the HTTP response (and the TCP FIN) actually reach
+// the browser before the radio goes away.
+void reboot_timer_cb(void* /*arg*/) {
+    ESP_LOGW(kTag, "rebooting (requested via /api/reboot)");
+    esp_restart();
+}
+
+esp_err_t handle_api_reboot(httpd_req_t* req) {
+    // Drain any (ignored) body so the connection state stays clean.
+    if (req->content_len > 0 && req->content_len <= kMaxBodyLen) {
+        char sink[128];
+        size_t left = req->content_len;
+        while (left > 0) {
+            int n = httpd_req_recv(
+                req, sink, left < sizeof(sink) ? left : sizeof(sink));
+            if (n <= 0) break;
+            left -= static_cast<size_t>(n);
+        }
+    }
+    esp_err_t err = send_json_ok(req, /*reboot_required=*/false);
+
+    static esp_timer_handle_t s_reboot_timer = nullptr;
+    if (!s_reboot_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = &reboot_timer_cb,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "httpcfg_reboot",
+            .skip_unhandled_events = false,
+        };
+        if (esp_timer_create(&args, &s_reboot_timer) != ESP_OK) {
+            ESP_LOGE(kTag, "reboot timer create failed — restarting inline");
+            esp_restart();
+        }
+    }
+    (void)esp_timer_start_once(s_reboot_timer, 500 * 1000);
+    return err;
+}
+
 // Captive-portal probe / catch-all response: plain 302 to the settings
 // page on the AP IP. iOS probes (`/hotspot-detect.html`, ...) follow this
 // and the OS pops the captive sheet directly on the settings page; Android
@@ -247,8 +582,10 @@ esp_err_t handle_404(httpd_req_t* req, httpd_err_code_t /*err*/) {
 esp_err_t start_httpd() {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
-    cfg.stack_size = 6144;
-    cfg.max_uri_handlers = 16;  // 2 pages + 6 probes + phase-2 headroom
+    // 8 KB: the write handlers keep a 1 KB body buffer + a Profile on the
+    // handler stack, plus cJSON parse depth.
+    cfg.stack_size = 8192;
+    cfg.max_uri_handlers = 16;  // 2 pages + 6 probes + 4 write APIs
     cfg.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&g_server, &cfg);
@@ -271,6 +608,32 @@ esp_err_t start_httpd() {
         httpd_stop(g_server);
         g_server = nullptr;
         return err;
+    }
+
+    // Config write endpoints (see the write-endpoint contract at the top
+    // of this file).
+    static constexpr struct {
+        const char* uri;
+        esp_err_t (*handler)(httpd_req_t*);
+    } kPostRoutes[] = {
+        {"/api/wifi",      &handle_api_wifi},
+        {"/api/tailscale", &handle_api_tailscale},
+        {"/api/profile",   &handle_api_profile},
+        {"/api/reboot",    &handle_api_reboot},
+    };
+    for (const auto& r : kPostRoutes) {
+        const httpd_uri_t post_uri = {
+            .uri = r.uri,
+            .method = HTTP_POST,
+            .handler = r.handler,
+            .user_ctx = nullptr,
+        };
+        if ((err = httpd_register_uri_handler(g_server, &post_uri))
+            != ESP_OK) {
+            httpd_stop(g_server);
+            g_server = nullptr;
+            return err;
+        }
     }
 
     // OS captive-portal detection probes. Android / Apple / Windows each
@@ -310,9 +673,9 @@ esp_err_t start_httpd() {
 esp_err_t start() {
     if (g_running) return ESP_OK;
 
-    // Refuse cleanly when Wi-Fi never came up (esp_wifi_init not run —
-    // e.g. no stored STA credentials, so wifi_sta_connect was skipped).
-    // Phase 2 may grow an AP-only bring-up path for virgin devices.
+    // Refuse cleanly when Wi-Fi never came up (esp_wifi_init not run).
+    // Callers that skipped wifi_sta_connect (virgin device without STA
+    // credentials) must run tab5::wifi_hw_init() first — app_main does.
     wifi_mode_t mode = WIFI_MODE_NULL;
     esp_err_t err = esp_wifi_get_mode(&mode);
     if (err != ESP_OK) {
@@ -365,6 +728,15 @@ esp_err_t start() {
 
     if ((err = esp_wifi_set_config(WIFI_IF_AP, &ap_cfg)) != ESP_OK) {
         ESP_LOGE(kTag, "set_config(AP) failed: %s", esp_err_to_name(err));
+        (void)esp_wifi_set_mode(WIFI_MODE_STA);
+        return err;
+    }
+
+    // Started already on the STA path (wifi_sta_connect); a no-op
+    // ESP_OK then. On the virgin-device AP-only path this is the call
+    // that actually raises the radio.
+    if ((err = esp_wifi_start()) != ESP_OK) {
+        ESP_LOGE(kTag, "esp_wifi_start failed: %s", esp_err_to_name(err));
         (void)esp_wifi_set_mode(WIFI_MODE_STA);
         return err;
     }

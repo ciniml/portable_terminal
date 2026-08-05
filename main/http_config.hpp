@@ -1,15 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Kenta IDA <fuga@fugafuga.org>
 // SPDX-License-Identifier: BSL-1.0
 //
-// HTTP-based configuration interface (phase 1: read-only firmware info).
+// HTTP-based configuration interface.
 //
 // Brings up a softAP ("Tab5-XXXXXX") alongside the existing STA
-// connection (WIFI_MODE_APSTA) and serves a settings landing page at
-// http://192.168.4.1/ plus a JSON firmware-info API at /api/info.
-//
-// Config *writing* (Wi-Fi credentials, SSH profiles, Tailscale auth
-// key) is phase 2 — the URL layout is designed to grow (/api/...)
-// but no write endpoint exists yet.
+// connection (WIFI_MODE_APSTA) and serves a settings page at
+// http://192.168.4.1/, a JSON status API at GET /api/info, and config
+// write endpoints (POST /api/wifi, /api/profile, /api/tailscale,
+// /api/reboot). Writes only persist to NVS and take effect after a
+// reboot — see the endpoint contract in http_config.cpp.
 #pragma once
 
 #include "esp_err.h"
@@ -27,10 +26,12 @@ namespace tab5::http_config {
 // (captive_portal.cpp) plus HTTP probe handlers make phones pop the
 // settings page automatically after joining.
 //
-// Safe to call after wifi_setup's STA init (esp_wifi_init must have
-// run); internally switches mode to WIFI_MODE_APSTA. Idempotent —
-// returns ESP_OK if already running. Returns the underlying error
-// otherwise (e.g. ESP_ERR_WIFI_NOT_INIT when Wi-Fi never came up).
+// Requires esp_wifi_init to have run — either via wifi_sta_connect()
+// or, on a credential-less virgin device, via tab5::wifi_hw_init().
+// Internally switches mode to WIFI_MODE_APSTA and calls
+// esp_wifi_start() (a no-op when the STA path already started the
+// radio). Idempotent — returns ESP_OK if already running. Returns the
+// underlying error otherwise (e.g. ESP_ERR_WIFI_NOT_INIT).
 esp_err_t start();
 
 // Stop HTTP server + softAP, drop back to WIFI_MODE_STA.

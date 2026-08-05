@@ -31,6 +31,51 @@ SPDX-License-Identifier: BSL-1.0
   td { font-family: ui-monospace, "SF Mono", Consolas, monospace; word-break: break-all; }
   .ok { color: #2a2; }
   .ng { color: #c33; }
+  form {
+    border: 1px solid #8885;
+    border-radius: .5rem;
+    padding: .8rem .9rem;
+    margin: .4rem 0 1rem;
+  }
+  form label {
+    display: block;
+    font-size: .9rem;
+    font-weight: 600;
+    margin-top: .5rem;
+  }
+  form label:first-child { margin-top: 0; }
+  form label.inline { display: inline-flex; align-items: center; gap: .4rem;
+                      font-weight: 400; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 1rem;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    padding: .35rem .5rem;
+    margin-top: .15rem;
+    border: 1px solid #8886;
+    border-radius: .35rem;
+    background: transparent;
+    color: inherit;
+  }
+  button {
+    font-size: .95rem;
+    padding: .4rem 1.1rem;
+    margin-top: .7rem;
+    border: 1px solid #8886;
+    border-radius: .4rem;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  button:hover { background: #8882; }
+  #reboot.hot {
+    border-color: #c60;
+    color: #c60;
+    font-weight: 700;
+  }
+  .result { font-size: .9rem; min-height: 1.2rem; margin: .3rem 0 0; }
+  .hint { font-size: .8rem; opacity: .7; margin: .1rem 0 0; }
   .note {
     margin-top: 1.6rem;
     padding: .7rem .9rem;
@@ -46,6 +91,70 @@ SPDX-License-Identifier: BSL-1.0
 <body>
 <h1>Tab5 設定</h1>
 <p id="err"></p>
+
+<h2>Wi-Fi (STA) 設定</h2>
+<form id="f-wifi">
+  <label>SSID
+    <input type="text" id="w-ssid" maxlength="32" autocomplete="off">
+  </label>
+  <label>パスワード
+    <input type="password" id="w-psk" maxlength="63"
+           placeholder="8〜63 文字" autocomplete="new-password">
+  </label>
+  <label class="inline">
+    <input type="checkbox" id="w-open"> オープンネットワーク (パスワードなし)
+  </label>
+  <p class="hint">SSID とパスワードは毎回両方送信されます (保存済みパスワードの
+  引き継ぎはありません)。</p>
+  <button type="submit">保存</button>
+  <p class="result" id="w-result"></p>
+</form>
+
+<h2>接続先プロファイル</h2>
+<form id="f-prof">
+  <label>プロトコル
+    <select id="p-proto">
+      <option value="ssh">SSH</option>
+      <option value="telnet">Telnet</option>
+    </select>
+  </label>
+  <label>ホスト
+    <input type="text" id="p-host" maxlength="63" autocomplete="off">
+  </label>
+  <label>ポート
+    <input type="number" id="p-port" min="1" max="65535" placeholder="22">
+  </label>
+  <label>ユーザー名 (SSH)
+    <input type="text" id="p-user" maxlength="31" autocomplete="off">
+  </label>
+  <label>パスワード (SSH)
+    <input type="password" id="p-pass" maxlength="63"
+           placeholder="(未変更)" autocomplete="new-password">
+  </label>
+  <p class="hint">パスワードを空のまま保存すると、保存済みのパスワード・認証方式を
+  維持します。</p>
+  <button type="submit">保存</button>
+  <p class="result" id="p-result"></p>
+</form>
+
+<h2>Tailscale</h2>
+<form id="f-ts">
+  <label>認証キー (tskey-...)
+    <input type="password" id="t-key" maxlength="127"
+           placeholder="(未変更)" autocomplete="off">
+  </label>
+  <label>ホスト名
+    <input type="text" id="t-host" maxlength="63" autocomplete="off">
+  </label>
+  <p class="hint">空欄のフィールドは保存済みの値を維持します。</p>
+  <button type="submit">保存</button>
+  <p class="result" id="t-result"></p>
+</form>
+
+<h2>再起動</h2>
+<p class="hint">保存した設定は再起動後に反映されます。</p>
+<button type="button" id="reboot">デバイスを再起動</button>
+<p class="result" id="r-result"></p>
 
 <h2>ファームウェア情報</h2>
 <table>
@@ -66,27 +175,142 @@ SPDX-License-Identifier: BSL-1.0
   <tr><th>OTA</th>               <td id="ota">—</td></tr>
 </table>
 
-<div class="note">
-  設定書き込み機能（Wi-Fi 認証情報・接続プロファイル・Tailscale
-  認証キーの設定）は今後追加予定です。現在はファームウェア情報の
-  表示のみに対応しています。
-</div>
-
-<footer>5 秒ごとに自動更新 — <span id="updated">未取得</span></footer>
+<footer>ステータスは 5 秒ごとに自動更新 — <span id="updated">未取得</span></footer>
 
 <script>
 "use strict";
 function txt(id, v) { document.getElementById(id).textContent = v; }
+function val(id) { return document.getElementById(id).value; }
 function fmtUptime(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600),
         m = Math.floor(s % 3600 / 60), sec = s % 60;
   return (d ? d + "d " : "") + h + "h " + m + "m " + sec + "s";
 }
+
+// Prefill runs once on the first successful /api/info so the periodic
+// refresh never clobbers a form the user is editing. Secrets are never
+// returned by the API — those fields stay blank with a placeholder,
+// and an empty submit means "keep the stored value" (except Wi-Fi,
+// which requires both fields every time).
+let prefilled = false;
+function prefill(j) {
+  if (prefilled) return;
+  prefilled = true;
+  const w = j.wifi || {};
+  document.getElementById("w-ssid").value = w.ssid || "";
+  const p = j.profile || {};
+  if (p.proto === "ssh" || p.proto === "telnet") {
+    document.getElementById("p-proto").value = p.proto;
+  }
+  document.getElementById("p-host").value = p.host || "";
+  if (p.port) document.getElementById("p-port").value = p.port;
+  document.getElementById("p-user").value = p.user || "";
+  if (p.password_set) {
+    document.getElementById("p-pass").placeholder = "(未変更 — 保存済み)";
+  }
+  const t = j.ts_cfg || {};
+  document.getElementById("t-host").value = t.hostname || "";
+  if (t.auth_key_set) {
+    document.getElementById("t-key").placeholder = "(未変更 — 保存済み)";
+  }
+}
+
+function showResult(id, ok, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = "result " + (ok ? "ok" : "ng");
+  if (ok) document.getElementById("reboot").classList.add("hot");
+}
+
+async function post(url, body, resultId) {
+  const el = document.getElementById(resultId);
+  el.textContent = "送信中...";
+  el.className = "result";
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      showResult(resultId, true, "保存しました。再起動後に反映されます");
+      return true;
+    }
+    showResult(resultId, false, "失敗: " + (j.error || "HTTP " + r.status));
+  } catch (e) {
+    showResult(resultId, false, "失敗: " + e.message);
+  }
+  return false;
+}
+
+document.getElementById("f-wifi").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const ssid = val("w-ssid"), psk = val("w-psk");
+  const open = document.getElementById("w-open").checked;
+  if (!ssid) {
+    showResult("w-result", false, "SSID を入力してください");
+    return;
+  }
+  if (!psk && !open) {
+    showResult("w-result", false,
+      "パスワードを入力するか「オープンネットワーク」をチェックしてください");
+    return;
+  }
+  if (psk && (psk.length < 8 || psk.length > 63)) {
+    showResult("w-result", false, "パスワードは 8〜63 文字です");
+    return;
+  }
+  post("/api/wifi", { ssid: ssid, psk: open ? "" : psk, open: open },
+       "w-result");
+});
+
+document.getElementById("f-prof").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const proto = val("p-proto"), host = val("p-host");
+  if (!host) {
+    showResult("p-result", false, "ホストを入力してください");
+    return;
+  }
+  const body = { proto: proto, host: host };
+  const port = parseInt(val("p-port"), 10);
+  if (port) body.port = port;
+  if (val("p-user")) body.user = val("p-user");
+  if (val("p-pass")) body.password = val("p-pass");  // empty = keep stored
+  post("/api/profile", body, "p-result");
+});
+
+document.getElementById("f-ts").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const body = {};  // empty fields omitted = keep stored values
+  if (val("t-key"))  body.auth_key = val("t-key");
+  if (val("t-host")) body.hostname = val("t-host");
+  if (!body.auth_key && !body.hostname) {
+    showResult("t-result", false, "変更するフィールドを入力してください");
+    return;
+  }
+  if (body.auth_key && !body.auth_key.startsWith("tskey-")) {
+    showResult("t-result", false, "認証キーは tskey- で始まる必要があります");
+    return;
+  }
+  post("/api/tailscale", body, "t-result");
+});
+
+document.getElementById("reboot").addEventListener("click", async () => {
+  if (!confirm("デバイスを再起動しますか？")) return;
+  const ok = await post("/api/reboot", {}, "r-result");
+  if (ok) {
+    showResult("r-result", true,
+      "再起動中... 数十秒後にページを再読み込みしてください");
+  }
+});
+
 async function refresh() {
   try {
     const r = await fetch("/api/info");
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
+    prefill(j);
     txt("project", j.project || "—");
     txt("version", j.version || "—");
     txt("idf", j.idf || "—");

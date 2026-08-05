@@ -198,8 +198,47 @@ Expected: 52 / 52 tests pass.
 
 With `CONFIG_TAB5_HTTP_CONFIG_ENABLED=y` (default) the device brings up a
 WPA2 softAP `Tab5-XXXXXX` (suffix = AP MAC) alongside the STA connection and
-serves a settings page at `http://192.168.4.1/` plus a JSON status API at
-`/api/info`.
+serves a settings page at `http://192.168.4.1/`, a JSON status API at
+`GET /api/info`, and config write APIs:
+
+| Route | Body (JSON) | Effect |
+|---|---|---|
+| `POST /api/wifi` | `{"ssid","psk","open"?}` | Store STA credentials (NVS) |
+| `POST /api/profile` | `{"proto","host","port"?,"user"?,"password"?}` | Store connection profile 0 |
+| `POST /api/tailscale` | `{"auth_key"?,"hostname"?}` | Store Tailscale config (NVS `tailscale`) |
+| `POST /api/reboot` | — | Reboot ~500 ms after replying |
+
+Writes only persist to NVS and take effect after a reboot (responses carry
+`"reboot_required": true`; the page highlights its reboot button). Bodies
+are capped at 1 KB; `/api/info` reports only `*_set` booleans for secrets,
+never the secrets themselves.
+
+**Empty-secret contract** (mirrored by the settings-page forms):
+
+- `/api/wifi` — `ssid` and `psk` are required on *every* submit; there is
+  no "keep stored psk" shortcut (a wrong stored psk is exactly what this
+  endpoint must fix). An empty `psk` is only accepted with an explicit
+  `"open": true` (open network).
+- `/api/profile` — an empty/absent `password` keeps profile 0's stored
+  password *and* auth mode (so a host-only edit doesn't clobber a pubkey
+  setup; the key itself stays firmware-embedded). A non-empty password
+  switches auth to password.
+- `/api/tailscale` — empty/absent fields keep the stored values; a
+  non-empty `auth_key` must start with `tskey-`.
+
+**Provisioning flow, start to finish** — on a virgin device (no stored STA
+credentials) the boot path calls `wifi_hw_init()` (C6 power-up +
+esp_hosted + `esp_wifi_init`, no STA join) and starts the config AP
+directly, so provisioning works before any network is configured:
+
+1. Virgin device boots → no STA credentials → config AP `Tab5-XXXXXX`
+   comes up and the LCD shows the QR onboarding overlay.
+2. Scan the Wi-Fi QR with a phone (joins the AP), then the URL QR — or let
+   the captive portal pop `http://192.168.4.1/` automatically.
+3. Fill in the Wi-Fi form (plus profile / Tailscale as needed) → 保存.
+4. Tap the highlighted reboot button (or power-cycle).
+5. The reboot picks up the stored credentials and joins the STA network
+   normally; the settings page stays reachable on the AP (and the LAN).
 
 - **Per-device AP password** — generated once on first boot (10 chars,
   lowercase + digits without the ambiguous `0/o/1/l`) and persisted in NVS

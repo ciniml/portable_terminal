@@ -102,13 +102,9 @@ void tab5_c6_power_enable(bool en) {
 }
 }  // namespace
 
-term::Result<void> wifi_sta_connect(std::string_view ssid,
-                                    std::string_view psk,
-                                    int timeout_s) {
-    if (ssid.empty()) {
-        ESP_LOGE(kTag, "SSID is empty");
-        return std::unexpected(term::Error::NotInitialized);
-    }
+term::Result<void> wifi_hw_init() {
+    static bool s_done = false;
+    if (s_done) return {};
 
     // Bring PI4IOE2 (0x44) into a known state — M5Unified only constructs
     // the IO expander; comprehensive register init (chip reset, dirs, pulls,
@@ -145,6 +141,20 @@ term::Result<void> wifi_sta_connect(std::string_view ssid,
         WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, nullptr, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, nullptr, nullptr));
+
+    s_done = true;
+    return {};
+}
+
+term::Result<void> wifi_sta_connect(std::string_view ssid,
+                                    std::string_view psk,
+                                    int timeout_s) {
+    if (ssid.empty()) {
+        ESP_LOGE(kTag, "SSID is empty");
+        return std::unexpected(term::Error::NotInitialized);
+    }
+
+    if (auto rc = wifi_hw_init(); !rc) return rc;
 
     wifi_config_t wcfg{};
     size_t n = std::min<size_t>(ssid.size(), sizeof(wcfg.sta.ssid) - 1);

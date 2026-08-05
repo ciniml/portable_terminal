@@ -287,6 +287,45 @@ void do_boot_sequence(const BootDeps& d) {
             }
         }
     }
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+    else {
+        // Virgin device: no stored STA credentials at all — the case
+        // where provisioning matters most. Bring the Wi-Fi hardware up
+        // without a STA join (C6 power + esp_hosted + esp_wifi_init)
+        // so the config softAP + portal can run, and show the QR
+        // onboarding overlay. After the user saves credentials through
+        // the portal and reboots, the normal STA path takes over.
+        d.term_write("\x1b[33mNo Wi-Fi credentials — starting config AP "
+                     "for provisioning\x1b[0m\r\n"sv);
+        if (!tab5::wifi_hw_init()) {
+            d.term_write("\x1b[31mWi-Fi hardware init failed\x1b[0m\r\n\r\n"sv);
+            tab5::boot_progress::set(Stage::Failed, "wifi hw");
+            return;
+        }
+        if (esp_err_t herr = tab5::http_config::start(); herr != ESP_OK) {
+            ESP_LOGW(kTag, "HTTP config service start failed: %s",
+                     esp_err_to_name(herr));
+            d.term_write("\x1b[31mConfig AP start failed\x1b[0m\r\n\r\n"sv);
+            tab5::boot_progress::set(Stage::Failed, "config ap");
+            return;
+        }
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "\x1b[2mConfig AP \"%s\"  pass \"%s\"  "
+                      "http://192.168.4.1/\x1b[0m\r\n",
+                      tab5::http_config::ap_ssid(),
+                      tab5::http_config::ap_psk());
+        d.term_write(line);
+        {
+            Lock lk;
+            tab5::ap_qr_screen::show();
+            tab5::ui_root::set_overlay_active(true);
+            tab5::ui_root::invalidate(tab5::ui_root::kFullScreen);
+        }
+        tab5::boot_progress::set(Stage::Done, "provisioning");
+        return;
+    }
+#endif
 #endif
 
     // Remote auto-connect from the selected profile.
