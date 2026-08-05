@@ -190,6 +190,31 @@ make clean-host
 
 期待結果: 52 / 52 テストが成功。
 
+## HTTP 設定サービス (softAP + QR オンボーディング)
+
+`CONFIG_TAB5_HTTP_CONFIG_ENABLED=y` (デフォルト) の場合、STA 接続と並行して
+WPA2 の softAP `Tab5-XXXXXX` (サフィックスは AP MAC) を立ち上げ、
+`http://192.168.4.1/` に設定ページ、`/api/info` に JSON ステータス API を
+提供します。
+
+- **機体ごとの AP パスワード** — 初回起動時に 10 文字 (紛らわしい
+  `0/o/1/l` を除いた小文字+数字) を生成して NVS (ネームスペース
+  `httpcfg`、キー `ap_psk`) に保存するため、再起動しても変わりません。
+  `CONFIG_TAB5_HTTP_CONFIG_AP_PSK` を非空にするとそちらが優先されます
+  (開発用)。パスワードを忘れた場合はターミナルの起動ログ
+  (`Config AP "Tab5-XXXXXX" pass "..."`) を確認するか、
+  `idf.py erase-flash` で再生成されます。
+- **QR オンボーディング** — STA 接続に *失敗* した場合 (資格情報の誤り
+  など)、LCD にフルスクリーンで 2 つの QR コードを表示します。Wi-Fi QR
+  (`WIFI:T:WPA;...` — 標準カメラアプリで読むだけで AP に接続) と
+  `http://192.168.4.1/` の URL QR、および平文の SSID / パスワードです。
+  キー入力またはタップで閉じます。
+- **キャプティブポータル** — UDP/53 の小さな DNS レスポンダが全クエリに
+  `192.168.4.1` を返し、HTTP サーバは OS の接続性プローブ
+  (`/generate_204`、`/hotspot-detect.html`、`/connecttest.txt` など) と
+  未知のパスをすべて設定ページへ 302 リダイレクトするため、AP に参加した
+  スマートフォンでは設定ページが自動的に開きます。
+
 ## OTA アップデート
 
 GitHub Pages にホストされた `latest.json` を 6 時間おき (±15 分のジッタ、

@@ -236,15 +236,19 @@ menu "Tab5 terminal"
                 read-only; config writes come later.
 
         config TAB5_HTTP_CONFIG_AP_PSK
-            string "softAP WPA2 passphrase (empty = open)"
+            string "softAP WPA2 passphrase (empty = per-device generated)"
             depends on TAB5_HTTP_CONFIG_ENABLED
             default ""
             help
-                WPA2-PSK passphrase for the settings softAP. Must be
-                8-63 characters; an empty string means an open
-                (unencrypted) AP. A non-empty value shorter than 8
-                characters is rejected at runtime and falls back to
-                an open AP with an error log.
+                WPA2-PSK passphrase override for the settings softAP.
+                Must be 8-63 characters when set. Leave empty (the
+                default) to use a random per-device 10-character
+                password generated on first boot and persisted in NVS
+                (namespace "httpcfg", key "ap_psk") — shown on the LCD
+                QR onboarding screen and in the serial boot log. A
+                non-empty value shorter than 8 characters is rejected
+                at runtime (falls back to the generated password).
+                `idf.py erase-flash` regenerates the stored password.
 
         config TAB5_HTTP_CONFIG_AP_CHANNEL
             int "softAP channel"

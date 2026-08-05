@@ -43,6 +43,7 @@
 #if CONFIG_TAB5_HTTP_CONFIG_ENABLED
 #include "http_config.hpp"
 #endif
+#include "ap_qr_screen.hpp"
 #include "vpn.hpp"
 #include "connection.hpp"
 #include "profiles.hpp"
@@ -95,6 +96,21 @@ void on_blink_tick(void* /*arg*/) {
     g_cursor->toggle_blink();
 }
 
+// Dismiss the AP-QR onboarding overlay if it is on screen. Returns true
+// when the overlay was up (the triggering keypress / tap is consumed).
+// Restores the ui_root overlay flag to whatever the menu needs and
+// repaints the whole screen so the terminal reappears. When
+// CONFIG_TAB5_HTTP_CONFIG_ENABLED=n the visible() stub is constant
+// false, so this compiles away.
+bool dismiss_qr_screen_if_visible() {
+    if (!tab5::ap_qr_screen::visible()) return false;
+    Lock lk;
+    tab5::ap_qr_screen::dismiss();
+    tab5::ui_root::set_overlay_active(tab5::menu.visible());
+    tab5::ui_root::invalidate(tab5::ui_root::kFullScreen);
+    return true;
+}
+
 // Build a sink that owns its own CookedInputFilter so each input source
 // (USB-JTAG, UART, USB-HID, soft keyboard) tracks CR/LF state independently
 // while no remote session is up. The sink itself dispatches:
@@ -111,6 +127,9 @@ template <class TerminalApply>
 tab5::ByteSink make_source_sink(TerminalApply&& apply) {
     auto state = std::make_shared<tab5::CookedInputFilter>();
     return [state, apply](std::span<const uint8_t> bytes) mutable {
+        // Any key dismisses the AP-QR onboarding overlay (and is
+        // consumed — it shouldn't leak into the terminal / remote).
+        if (dismiss_qr_screen_if_visible()) return;
         // When the settings menu is on screen it captures all physical
         // keyboard input — arrow keys for nav, Enter to activate, ESC
         // to close, plus printable/BS for the focused text field.
@@ -178,9 +197,10 @@ void do_boot_sequence(const BootDeps& d) {
                      esp_err_to_name(herr));
         } else {
             std::snprintf(line, sizeof(line),
-                          "\x1b[2mConfig AP \"%s\"  http://192.168.4.1/"
-                          "\x1b[0m\r\n",
-                          tab5::http_config::ap_ssid());
+                          "\x1b[2mConfig AP \"%s\"  pass \"%s\"  "
+                          "http://192.168.4.1/\x1b[0m\r\n",
+                          tab5::http_config::ap_ssid(),
+                          tab5::http_config::ap_psk());
             d.term_write(line);
         }
 #endif
@@ -193,6 +213,18 @@ void do_boot_sequence(const BootDeps& d) {
         if (!rc) {
             tab5::boot_progress::set(Stage::Failed, "wifi");
             d.term_write("\x1b[31mWi-Fi connect failed\x1b[0m\r\n\r\n"sv);
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+            // STA credentials are wrong / stale — the "needs
+            // provisioning" case. Pop the QR onboarding overlay so the
+            // user can join the config AP and open the portal without
+            // typing anything. Any key / tap dismisses it.
+            if (tab5::http_config::is_running()) {
+                Lock lk;
+                tab5::ap_qr_screen::show();
+                tab5::ui_root::set_overlay_active(true);
+                tab5::ui_root::invalidate(tab5::ui_root::kFullScreen);
+            }
+#endif
             return;
         }
         auto st = tab5::wifi_status();
@@ -434,6 +466,14 @@ extern "C" void app_main(void) {
     static tab5::CursorRenderer cursor(terminal.screen(), display);
     g_cursor = &cursor;
 
+    // Terminal → host back-channel: DSR (ESC[6n etc.) replies go to the
+    // active remote. Runs inside terminal.feed() on the connection's RX
+    // task; with no connection up the reply is dropped (local echo has
+    // nobody to answer).
+    terminal.screen().set_response_sink([](std::span<const uint8_t> bytes) {
+        if (auto* c = tab5::active_connection()) c->send(bytes);
+    });
+
     using namespace std::string_view_literals;
     constexpr auto kBoot =
         "\x1b[2J\x1b[H"
@@ -639,6 +679,12 @@ extern "C" void app_main(void) {
         if (tab5::menu.visible()) tab5::menu.render();
     });
 
+    // z=110 AP-QR onboarding overlay (above everything; shown when the
+    // STA connect failed and the config softAP is up)
+    ui::register_layer(110, [](const ui::Rect&) {
+        if (tab5::ap_qr_screen::visible()) tab5::ap_qr_screen::render();
+    });
+
     // --- Visibility-transition repaints ------------------------------
     // Soft keyboard show/hide: resize the terminal grid (and the remote
     // pty via SSH WINCH) so cells stay above the panel; then invalidate
@@ -661,7 +707,8 @@ extern "C" void app_main(void) {
     // also gates terminal RX rendering and cursor blink so they don't
     // bleed through the modal.
     static auto repaint_menu = [] {
-        ui::set_overlay_active(tab5::menu.visible());
+        ui::set_overlay_active(tab5::menu.visible() ||
+                               tab5::ap_qr_screen::visible());
         ui::invalidate(ui::kFullScreen);
     };
     tab5::menu.set_repaint(repaint_menu);
@@ -677,6 +724,15 @@ extern "C" void app_main(void) {
         // before the menu / keyboard get a chance. handle_touch already
         // hit-tests against the published button rect.
         if (tab5::boot_progress::handle_touch(p)) return;
+        // While the AP-QR onboarding overlay is up it owns the touch
+        // surface: a tap dismisses it, everything else is swallowed so
+        // it can't reach the keyboard / menu underneath.
+        if (tab5::ap_qr_screen::visible()) {
+            if (p.event == tab5::TouchEvent::Down) {
+                (void)dismiss_qr_screen_if_visible();
+            }
+            return;
+        }
         Lock lk;
         if (tab5::menu.visible() && tab5::menu.handle_touch(p)) return;
         // Menu may return false to let the soft keyboard receive the

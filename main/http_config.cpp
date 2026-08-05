@@ -25,10 +25,13 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "nvs.h"
 
+#include "captive_portal.hpp"
 #include "wifi_setup.hpp"
 
 #if CONFIG_TAB5_OTA_ENABLED
@@ -48,6 +51,69 @@ httpd_handle_t g_server = nullptr;
 esp_netif_t* g_ap_netif = nullptr;
 bool g_running = false;
 char g_ssid[33] = {};
+char g_psk[65] = {};
+
+// NVS home for the generated AP passphrase. Namespace is shared with
+// future HTTP-config settings.
+constexpr const char* kNvsNamespace = "httpcfg";
+constexpr const char* kNvsKeyApPsk  = "ap_psk";
+
+// Resolve the effective AP passphrase into g_psk:
+//   1. Non-empty CONFIG_TAB5_HTTP_CONFIG_AP_PSK (>= 8 chars) wins — dev
+//      convenience for a fixed, known password.
+//   2. Otherwise a per-device 10-char password is generated once and
+//      persisted in NVS ("httpcfg"/"ap_psk"), so it stays stable across
+//      reboots. Charset avoids the ambiguous 0/o/1/l glyphs since users
+//      may have to type it manually if they can't scan the QR code.
+// Only an unrecoverable NVS failure leaves g_psk empty (open AP).
+void resolve_ap_psk() {
+    constexpr const char* kCfgPsk = CONFIG_TAB5_HTTP_CONFIG_AP_PSK;
+    const size_t cfg_len = std::strlen(kCfgPsk);
+    if (cfg_len >= 8) {
+        std::snprintf(g_psk, sizeof(g_psk), "%s", kCfgPsk);
+        return;
+    }
+    if (cfg_len > 0) {
+        ESP_LOGE(kTag, "CONFIG_TAB5_HTTP_CONFIG_AP_PSK shorter than 8 chars "
+                 "— ignoring it and using the generated per-device password");
+    }
+
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "nvs_open(%s) failed: %s — AP will be OPEN",
+                 kNvsNamespace, esp_err_to_name(err));
+        g_psk[0] = '\0';
+        return;
+    }
+    size_t len = sizeof(g_psk);
+    err = nvs_get_str(nvs, kNvsKeyApPsk, g_psk, &len);
+    if (err == ESP_OK && std::strlen(g_psk) >= 8) {
+        nvs_close(nvs);
+        return;
+    }
+
+    // First boot (or corrupted entry): generate and persist.
+    // Lowercase + digits minus ambiguous 0/o/1/l → 32 symbols, so a
+    // 10-char password carries 50 bits of entropy.
+    constexpr char kCharset[] = "abcdefghijkmnpqrstuvwxyz23456789";
+    constexpr size_t kSetLen = sizeof(kCharset) - 1;
+    static_assert(kSetLen == 32);
+    constexpr size_t kPskLen = 10;
+    for (size_t i = 0; i < kPskLen; ++i) {
+        g_psk[i] = kCharset[esp_random() % kSetLen];
+    }
+    g_psk[kPskLen] = '\0';
+    if ((err = nvs_set_str(nvs, kNvsKeyApPsk, g_psk)) != ESP_OK ||
+        (err = nvs_commit(nvs)) != ESP_OK) {
+        ESP_LOGW(kTag, "persisting AP password failed: %s — password will "
+                 "rotate on next boot", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(kTag, "generated per-device AP password (NVS %s/%s)",
+                 kNvsNamespace, kNvsKeyApPsk);
+    }
+    nvs_close(nvs);
+}
 
 // Landing page embedded via EMBED_TXTFILES (NUL-terminated).
 extern "C" const char page_html_start[] asm(
@@ -113,6 +179,9 @@ esp_err_t handle_api_info(httpd_req_t* req) {
     {
         cJSON* ap = cJSON_AddObjectToObject(root, "ap");
         cJSON_AddStringToObject(ap, "ssid", g_ssid);
+        // Never leak the password itself over the API — anyone on the AP
+        // already knows it, but keep the JSON clean.
+        cJSON_AddBoolToObject(ap, "psk_set", std::strlen(g_psk) >= 8);
     }
 
 #if CONFIG_TAB5_OTA_ENABLED
@@ -149,11 +218,37 @@ esp_err_t handle_api_info(httpd_req_t* req) {
     return err;
 }
 
+// Captive-portal probe / catch-all response: plain 302 to the settings
+// page on the AP IP. iOS probes (`/hotspot-detect.html`, ...) follow this
+// and the OS pops the captive sheet directly on the settings page; Android
+// and Windows behave the same via their own probe URLs. Do NOT be tempted
+// to answer Android's `/generate_204` with a genuine 204 — Android also
+// verifies connectivity over HTTPS, so an HTTP-only 204 never convinces
+// it there is real internet; it just drops the captive-portal state and
+// auto-switches back to a saved AP (observed on stackchan-idf).
+esp_err_t redirect_to_portal(httpd_req_t* req) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_sendstr(req, "Tab5 settings — see http://192.168.4.1/");
+    return ESP_OK;
+}
+
+esp_err_t handle_probe(httpd_req_t* req) {
+    return redirect_to_portal(req);
+}
+
+// 404 catch-all: any unknown path (typed URLs, other OS probe variants)
+// also lands on the portal while the AP is up.
+esp_err_t handle_404(httpd_req_t* req, httpd_err_code_t /*err*/) {
+    return redirect_to_portal(req);
+}
+
 esp_err_t start_httpd() {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
     cfg.stack_size = 6144;
-    cfg.max_uri_handlers = 8;   // headroom for phase-2 write endpoints
+    cfg.max_uri_handlers = 16;  // 2 pages + 6 probes + phase-2 headroom
     cfg.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&g_server, &cfg);
@@ -177,6 +272,36 @@ esp_err_t start_httpd() {
         g_server = nullptr;
         return err;
     }
+
+    // OS captive-portal detection probes. Android / Apple / Windows each
+    // poke a well-known URL after association; the 302 below (together
+    // with the DNS hijack in captive_portal.cpp) is what makes the
+    // "sign in to network" sheet pop with our settings page.
+    static constexpr const char* kProbeUris[] = {
+        "/generate_204",              // Android
+        "/gen_204",                   // Android (older)
+        "/hotspot-detect.html",       // Apple
+        "/library/test/success.html", // Apple (older)
+        "/connecttest.txt",           // Windows NCSI
+        "/ncsi.txt",                  // Windows NCSI (legacy)
+    };
+    for (const char* uri : kProbeUris) {
+        const httpd_uri_t probe_uri = {
+            .uri = uri,
+            .method = HTTP_GET,
+            .handler = &handle_probe,
+            .user_ctx = nullptr,
+        };
+        if ((err = httpd_register_uri_handler(g_server, &probe_uri))
+            != ESP_OK) {
+            httpd_stop(g_server);
+            g_server = nullptr;
+            return err;
+        }
+    }
+    // Everything else 302s to the portal too.
+    (void)httpd_register_err_handler(g_server, HTTPD_404_NOT_FOUND,
+                                     &handle_404);
     return ESP_OK;
 }
 
@@ -226,17 +351,15 @@ esp_err_t start() {
     ap_cfg.ap.channel = CONFIG_TAB5_HTTP_CONFIG_AP_CHANNEL;
     ap_cfg.ap.max_connection = 4;
 
-    constexpr const char* kPsk = CONFIG_TAB5_HTTP_CONFIG_AP_PSK;
-    const size_t psk_len = std::strlen(kPsk);
-    if (psk_len >= 8) {
-        std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.password), kPsk,
+    // Kconfig override, or the persisted per-device password (generated
+    // on first boot). Empty only if NVS is completely broken.
+    resolve_ap_psk();
+    if (std::strlen(g_psk) >= 8) {
+        std::strncpy(reinterpret_cast<char*>(ap_cfg.ap.password), g_psk,
                      sizeof(ap_cfg.ap.password));
         ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
-        if (psk_len > 0) {
-            ESP_LOGE(kTag, "AP PSK shorter than 8 chars — falling back to "
-                     "an OPEN AP (fix CONFIG_TAB5_HTTP_CONFIG_AP_PSK)");
-        }
+        ESP_LOGE(kTag, "no usable AP password — falling back to an OPEN AP");
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
 
@@ -252,6 +375,9 @@ esp_err_t start() {
         return err;
     }
 
+    // DNS hijack so phone captive-portal probes resolve to 192.168.4.1.
+    captive_portal::start();
+
     g_running = true;
     ESP_LOGI(kTag, "settings service up: SSID=%s auth=%s http://192.168.4.1/",
              g_ssid, ap_cfg.ap.authmode == WIFI_AUTH_OPEN ? "open" : "wpa2");
@@ -260,6 +386,7 @@ esp_err_t start() {
 
 void stop() {
     if (!g_running) return;
+    captive_portal::stop();
     if (g_server) {
         httpd_stop(g_server);
         g_server = nullptr;
@@ -279,6 +406,10 @@ bool is_running() {
 
 const char* ap_ssid() {
     return g_ssid;
+}
+
+const char* ap_psk() {
+    return g_psk;
 }
 
 }  // namespace tab5::http_config

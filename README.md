@@ -194,6 +194,31 @@ make clean-host
 
 Expected: 52 / 52 tests pass.
 
+## HTTP settings service (softAP + QR onboarding)
+
+With `CONFIG_TAB5_HTTP_CONFIG_ENABLED=y` (default) the device brings up a
+WPA2 softAP `Tab5-XXXXXX` (suffix = AP MAC) alongside the STA connection and
+serves a settings page at `http://192.168.4.1/` plus a JSON status API at
+`/api/info`.
+
+- **Per-device AP password** — generated once on first boot (10 chars,
+  lowercase + digits without the ambiguous `0/o/1/l`) and persisted in NVS
+  (namespace `httpcfg`, key `ap_psk`), so it is stable across reboots.
+  Setting a non-empty `CONFIG_TAB5_HTTP_CONFIG_AP_PSK` overrides it (dev
+  convenience). Forgot the password? It is printed in the terminal boot
+  output (`Config AP "Tab5-XXXXXX" pass "..."`), and `idf.py erase-flash`
+  regenerates it.
+- **QR onboarding** — when the STA connect *fails* (wrong / stale
+  credentials), the LCD shows a full-screen overlay with two QR codes: a
+  Wi-Fi QR (`WIFI:T:WPA;...`, joins the phone to the AP straight from the
+  stock camera app) and a URL QR for `http://192.168.4.1/`, plus the
+  credentials in plain text. Any key press or tap dismisses it.
+- **Captive portal** — a tiny UDP/53 DNS responder answers every query with
+  `192.168.4.1`, and the HTTP server 302-redirects the OS connectivity
+  probes (`/generate_204`, `/hotspot-detect.html`, `/connecttest.txt`, ...)
+  and all unknown paths to the settings page — so most phones pop the
+  portal automatically right after joining the AP.
+
 ## OTA update
 
 The firmware polls a `latest.json` manifest on GitHub Pages every 6 h
