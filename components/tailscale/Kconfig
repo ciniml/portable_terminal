@@ -21,7 +21,7 @@ menu "Tailscale"
     config TAILSCALE_HOSTNAME
         string "Hostname on Tailscale network"
         depends on TAILSCALE_ENABLE
-        default "esp32-serial"
+        default "tab5"
         help
             The device hostname as it will appear in the Tailscale admin console.
             Can be overridden at runtime via NVS key "hostname".
