@@ -167,6 +167,11 @@ bool get_pending_auth_url(char* out, size_t out_len) {
 #if CONFIG_TAILSCALE_ENABLE
     if (!out || !out_len) return false;
     out[0] = '\0';
+    // Once the tunnel is up nothing is "pending" any more. The stored
+    // URL is only reset by the next /machine/register round-trip, so
+    // without this guard it could linger after login completes via the
+    // map long-poll path.
+    if (tailscale_esp32_is_connected()) return false;
     if (tailscale_esp32_get_auth_url(out, out_len) != ESP_OK) return false;
     return out[0] != '\0';
 #else

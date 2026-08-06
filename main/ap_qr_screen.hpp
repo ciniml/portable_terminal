@@ -7,6 +7,9 @@
 // two QR codes — one that joins the phone to the Tab5-XXXXXX AP
 // (standard WIFI: payload, scanned by the stock iOS / Android camera)
 // and one with the portal URL — plus the credentials in plain text.
+// When Tailscale registration is awaiting interactive login (auth URL
+// pending at show() time) a third QR with that login URL is added so
+// the device can be registered by scanning it with a phone.
 //
 // Follows the menu.cpp convention: rendering is passive. app_main
 // registers a ui_root layer that calls render() while visible() and
@@ -23,7 +26,8 @@ namespace tab5::ap_qr_screen {
 
 // Mark the overlay visible. Snapshot of SSID / password is taken from
 // http_config::ap_ssid()/ap_psk() at render time, so call only after
-// http_config::start() succeeded. Caller must hold the UI lock and
+// http_config::start() succeeded. The Tailscale auth URL (if any) is
+// snapshotted here, at show() time. Caller must hold the UI lock and
 // invalidate the screen afterwards.
 void show();
 

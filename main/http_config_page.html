@@ -76,6 +76,15 @@ SPDX-License-Identifier: BSL-1.0
   }
   .result { font-size: .9rem; min-height: 1.2rem; margin: .3rem 0 0; }
   .hint { font-size: .8rem; opacity: .7; margin: .1rem 0 0; }
+  .notice {
+    border: 1px solid #c90;
+    border-radius: .5rem;
+    background: rgba(255, 200, 0, .12);
+    padding: .6rem .8rem;
+    margin: .4rem 0 .8rem;
+    font-size: .9rem;
+  }
+  .notice a { word-break: break-all; }
   .note {
     margin-top: 1.6rem;
     padding: .7rem .9rem;
@@ -138,6 +147,10 @@ SPDX-License-Identifier: BSL-1.0
 </form>
 
 <h2>Tailscale</h2>
+<div class="notice" id="ts-auth" hidden>
+  <strong>認証待ち:</strong> 下のリンクを開いて Tailscale にログインしてください<br>
+  <a id="ts-auth-link" target="_blank" rel="noopener"></a>
+</div>
 <form id="f-ts">
   <label>認証キー (tskey-...)
     <input type="password" id="t-key" maxlength="127"
@@ -335,6 +348,17 @@ async function refresh() {
     } else {
       tsEl.textContent = "無効";
       tsEl.className = "";
+    }
+    const authBox = document.getElementById("ts-auth");
+    const authLink = document.getElementById("ts-auth-link");
+    if (ts && ts.auth_url) {
+      authLink.href = ts.auth_url;
+      authLink.textContent = ts.auth_url;
+      authBox.hidden = false;
+    } else {
+      authBox.hidden = true;
+      authLink.removeAttribute("href");
+      authLink.textContent = "";
     }
 
     const ota = j.ota;

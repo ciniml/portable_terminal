@@ -261,6 +261,13 @@ esp_err_t handle_api_info(httpd_req_t* req) {
         } else {
             cJSON_AddStringToObject(ts, "ip", "");
         }
+        // Interactive-auth URL, non-empty while registration is waiting
+        // for the user to log in at login.tailscale.com. Suppressed once
+        // the tunnel is up — the stored URL only resets on the next
+        // register round-trip, so it can be momentarily stale.
+        char aurl[200] = {};
+        if (!up) tailscale_esp32_get_auth_url(aurl, sizeof(aurl));
+        cJSON_AddStringToObject(ts, "auth_url", aurl);
     }
 #endif
 
