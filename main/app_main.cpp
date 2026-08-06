@@ -652,6 +652,11 @@ extern "C" void app_main(void) {
 
     tab5::start_status_bar([](std::function<void()> body) {
         Lock lk;
+        // The status bar paints the right 160 px margin directly — while
+        // the fullscreen AP-QR overlay is up, that would draw over the
+        // rightmost QR and make it unscannable. Skip the tick; the next
+        // one (≤5 s after dismissal) repaints the margin.
+        if (tab5::ap_qr_screen::visible()) return;
         body();
     });
 
