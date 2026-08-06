@@ -164,6 +164,27 @@ SPDX-License-Identifier: BSL-1.0
   <p class="result" id="t-result"></p>
 </form>
 
+<h2>画面ロック</h2>
+<form id="f-lock">
+  <label class="inline">
+    <input type="checkbox" id="l-en"> アイドル時に自動ロックする
+  </label>
+  <label>アイドルタイムアウト (分)
+    <input type="number" id="l-min" min="1" max="1440" placeholder="10">
+  </label>
+  <label>PIN
+    <input type="password" id="l-pin" maxlength="8" inputmode="numeric"
+           pattern="[0-9]*" placeholder="4〜8 桁の数字"
+           autocomplete="new-password">
+  </label>
+  <p class="hint">PIN を空のまま保存すると、保存済みの PIN を維持します。
+  有効化には PIN の設定が必要です。設定は再起動なしで即時反映されます。
+  PIN を忘れた場合もこのページから再設定できます (簡易的な画面保護であり、
+  暗号学的な保護ではありません)。</p>
+  <button type="submit">保存</button>
+  <p class="result" id="l-result"></p>
+</form>
+
 <h2>再起動</h2>
 <p class="hint">保存した設定は再起動後に反映されます。</p>
 <button type="button" id="reboot">デバイスを再起動</button>
@@ -226,16 +247,27 @@ function prefill(j) {
   if (t.auth_key_set) {
     document.getElementById("t-key").placeholder = "(未変更 — 保存済み)";
   }
+  const sl = j.screenlock || {};
+  document.getElementById("l-en").checked = !!sl.enabled;
+  if (sl.timeout_min) {
+    document.getElementById("l-min").value = sl.timeout_min;
+  }
+  if (sl.pin_set) {
+    document.getElementById("l-pin").placeholder = "(未変更 — 保存済み)";
+  }
 }
 
-function showResult(id, ok, msg) {
+function showResult(id, ok, msg, hot) {
   const el = document.getElementById(id);
   el.textContent = msg;
   el.className = "result " + (ok ? "ok" : "ng");
-  if (ok) document.getElementById("reboot").classList.add("hot");
+  if (ok && hot !== false) document.getElementById("reboot").classList.add("hot");
 }
 
-async function post(url, body, resultId) {
+// okMsg / hot are optional: endpoints that apply live (screen lock)
+// pass their own success message and hot=false so the reboot button
+// isn't highlighted needlessly.
+async function post(url, body, resultId, okMsg, hot) {
   const el = document.getElementById(resultId);
   el.textContent = "送信中...";
   el.className = "result";
@@ -247,7 +279,8 @@ async function post(url, body, resultId) {
     });
     const j = await r.json();
     if (j.ok) {
-      showResult(resultId, true, "保存しました。再起動後に反映されます");
+      showResult(resultId, true,
+                 okMsg || "保存しました。再起動後に反映されます", hot);
       return true;
     }
     showResult(resultId, false, "失敗: " + (j.error || "HTTP " + r.status));
@@ -309,6 +342,34 @@ document.getElementById("f-ts").addEventListener("submit", (ev) => {
   post("/api/tailscale", body, "t-result");
 });
 
+// Whether a PIN is stored on the device — kept fresh by refresh() so
+// the "enable requires a PIN" check works without a page reload.
+let lockPinSet = false;
+document.getElementById("f-lock").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const en = document.getElementById("l-en").checked;
+  const min = parseInt(val("l-min"), 10) || 10;
+  const pin = val("l-pin");
+  if (min < 1 || min > 1440) {
+    showResult("l-result", false, "タイムアウトは 1〜1440 分です");
+    return;
+  }
+  if (pin && !/^[0-9]{4,8}$/.test(pin)) {
+    showResult("l-result", false, "PIN は 4〜8 桁の数字です");
+    return;
+  }
+  if (en && !pin && !lockPinSet) {
+    showResult("l-result", false, "有効化には PIN の設定が必要です");
+    return;
+  }
+  const body = { enabled: en, timeout_min: min };
+  if (pin) body.pin = pin;  // empty = keep stored PIN
+  post("/api/screenlock", body, "l-result",
+       "保存しました (即時反映)", /*hot=*/false).then((ok) => {
+    if (ok && pin) lockPinSet = true;
+  });
+});
+
 document.getElementById("reboot").addEventListener("click", async () => {
   if (!confirm("デバイスを再起動しますか？")) return;
   const ok = await post("/api/reboot", {}, "r-result");
@@ -324,6 +385,7 @@ async function refresh() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
     prefill(j);
+    if (j.screenlock) lockPinSet = !!j.screenlock.pin_set;
     txt("project", j.project || "—");
     txt("version", j.version || "—");
     txt("idf", j.idf || "—");

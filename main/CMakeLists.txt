@@ -44,6 +44,7 @@ idf_component_register(
         "connection.cpp"
         "profiles.cpp"
         "reconnect.cpp"
+        "screen_lock.cpp"
         "ssh_connection.cpp"
         "telnet_connection.cpp"
         "tofu.cpp"

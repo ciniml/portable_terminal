@@ -75,6 +75,13 @@ public:
     using ShowApQr = std::function<void()>;
     void set_show_ap_qr(ShowApQr cb) { show_ap_qr_ = std::move(cb); }
 
+    // "Lock" footer button (ProfileList): the menu closes itself, then
+    // invokes this callback so app_main can trigger screen_lock::
+    // lock_now(). Greyed out until a PIN is configured. Invoked with
+    // the UI lock held.
+    using LockNow = std::function<void()>;
+    void set_lock_now(LockNow cb) { lock_now_ = std::move(cb); }
+
     // The profile editor needs to redirect the keyboard's byte sink
     // into its own field buffers. app_main injects the SoftKeyboard
     // instance after constructing it.
@@ -98,6 +105,7 @@ private:
                                  // connect flag).
     Repaint repaint_;
     ShowApQr show_ap_qr_;
+    LockNow  lock_now_;
 
     // ---- ProfileEditor state ----
     struct Editor {
@@ -178,6 +186,7 @@ private:
     bool  hit_manage_wifi(int x, int y) const;   // on profile list
     bool  hit_ap_qr(int x, int y) const;         // on profile list
                                                  // (HTTP config builds only)
+    bool  hit_lock(int x, int y) const;          // on profile list
 
     int   hit_wifi_field(int x, int y) const;
     bool  hit_wifi_save(int x, int y) const;

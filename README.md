@@ -206,6 +206,7 @@ serves a settings page at `http://192.168.4.1/`, a JSON status API at
 | `POST /api/wifi` | `{"ssid","psk","open"?}` | Store STA credentials (NVS) |
 | `POST /api/profile` | `{"proto","host","port"?,"user"?,"password"?}` | Store connection profile 0 |
 | `POST /api/tailscale` | `{"auth_key"?,"hostname"?}` | Store Tailscale config (NVS `tailscale`) |
+| `POST /api/screenlock` | `{"enabled","timeout_min","pin"?}` | Screen-lock config (applies live, no reboot) |
 | `POST /api/reboot` | — | Reboot ~500 ms after replying |
 
 Writes only persist to NVS and take effect after a reboot (responses carry
@@ -225,6 +226,9 @@ never the secrets themselves.
   switches auth to password.
 - `/api/tailscale` — empty/absent fields keep the stored values; a
   non-empty `auth_key` must start with `tskey-`.
+- `/api/screenlock` — an empty/absent `pin` keeps the stored PIN hash;
+  `enabled: true` is refused unless a PIN is already stored or provided in
+  the same request. Unlike the other endpoints this one applies live.
 
 **Provisioning flow, start to finish** — on a virgin device (no stored STA
 credentials) the boot path calls `wifi_hw_init()` (C6 power-up +
@@ -257,6 +261,31 @@ directly, so provisioning works before any network is configured:
   probes (`/generate_204`, `/hotspot-detect.html`, `/connecttest.txt`, ...)
   and all unknown paths to the settings page — so most phones pop the
   portal automatically right after joining the AP.
+
+## Screen lock (idle lock + PIN)
+
+An optional privacy lock for shared desks: after a configurable idle
+period without *user* input (touch, soft keyboard, clip-on / USB
+keyboards, UART / USB-JTAG bytes — streaming SSH output does **not**
+count), the backlight switches off. The next input wakes the display
+onto a fullscreen PIN pad — never the terminal content. Enter the PIN
+by touch (numeric pad) or on a physical keyboard (digits + Backspace +
+Enter). Five wrong attempts trigger an escalating lockout (30 s
+doubling, capped at 240 s) with an on-screen countdown; the counter
+lives in RAM only and resets on unlock or reboot.
+
+- Configure it in the settings portal under 「画面ロック」: enable
+  toggle, idle timeout in minutes, PIN (4-8 digits). Settings apply
+  immediately, no reboot. The PIN is stored as a SHA-256 hash in NVS
+  (namespace `scrlock`).
+- Lock on demand via the `[Lock]` button in the ☰ menu footer (greyed
+  out until a PIN is set).
+- **Forgot the PIN?** Open the settings portal (softAP password is on
+  the QR overlay / boot log) and set a new PIN — the old one is not
+  required. This is deliberate: the screen lock is casual privacy
+  protection against shoulder-surfers, **not** cryptographic security.
+  Anyone with physical access and the AP password can reset it, and the
+  flash contents are not encrypted.
 
 ## OTA update
 

@@ -30,6 +30,7 @@
 #include "input_usb_hid.hpp"
 #include "input_usb_jtag.hpp"
 #include "menu.hpp"
+#include "screen_lock.hpp"
 #include "soft_keyboard.hpp"
 #include "status_bar.hpp"
 #include "ui_root.hpp"
@@ -92,8 +93,22 @@ public:
 void on_blink_tick(void* /*arg*/) {
     if (!g_cursor) return;
     Lock lk;
+    if (tab5::screen_lock::locked()) {
+        // Reuse the 500 ms cadence to refresh the wrong-PIN lockout
+        // countdown on the lock screen.
+        tab5::screen_lock::blink_tick();
+        return;
+    }
     if (tab5::ui_root::overlay_active()) return;
     g_cursor->toggle_blink();
+}
+
+// 30 s idle-lock check. Timeout granularity is minutes, so a coarse
+// period is fine; screen_lock::tick() takes care of the actual policy
+// (enabled flag, PIN present, AP-QR overlay suppression).
+void on_scrlock_tick(void* /*arg*/) {
+    Lock lk;
+    tab5::screen_lock::tick();
 }
 
 // Dismiss the AP-QR onboarding overlay if it is on screen. Returns true
@@ -127,6 +142,17 @@ template <class TerminalApply>
 tab5::ByteSink make_source_sink(TerminalApply&& apply) {
     auto state = std::make_shared<tab5::CookedInputFilter>();
     return [state, apply](std::span<const uint8_t> bytes) mutable {
+        tab5::screen_lock::activity_note();
+        // While locked, every byte belongs to the lock screen: the
+        // first one only wakes the backlight (consumed), later ones
+        // drive PIN entry. Nothing leaks to the terminal / remote.
+        if (tab5::screen_lock::locked()) {
+            Lock lk;
+            if (!tab5::screen_lock::wake_if_dark()) {
+                for (uint8_t b : bytes) (void)tab5::screen_lock::feed_key(b);
+            }
+            return;
+        }
         // Any key dismisses the AP-QR onboarding overlay (and is
         // consumed — it shouldn't leak into the terminal / remote).
         if (dismiss_qr_screen_if_visible()) return;
@@ -654,9 +680,11 @@ extern "C" void app_main(void) {
         Lock lk;
         // The status bar paints the right 160 px margin directly — while
         // the fullscreen AP-QR overlay is up, that would draw over the
-        // rightmost QR and make it unscannable. Skip the tick; the next
-        // one (≤5 s after dismissal) repaints the margin.
-        if (tab5::ap_qr_screen::visible()) return;
+        // rightmost QR and make it unscannable; while the screen lock is
+        // up it would leak status over the lock screen. Skip the tick;
+        // the next one (≤5 s after dismissal) repaints the margin.
+        if (tab5::ap_qr_screen::visible() ||
+            tab5::screen_lock::locked()) return;
         body();
     });
 
@@ -664,6 +692,7 @@ extern "C" void app_main(void) {
     // self-routes to active_connection() when one is up and falls back
     // to the local-echo path otherwise — no rebind needed.
     static tab5::SoftKeyboard kbd([&](std::span<const uint8_t> bytes) {
+        tab5::screen_lock::activity_note();
         usb_sink(bytes);
     });
     namespace ui = tab5::ui_root;
@@ -729,6 +758,11 @@ extern "C" void app_main(void) {
         if (tab5::ap_qr_screen::visible()) tab5::ap_qr_screen::render();
     });
 
+    // z=120 screen lock (topmost — nothing may paint over the PIN pad)
+    ui::register_layer(120, [](const ui::Rect&) {
+        if (tab5::screen_lock::locked()) tab5::screen_lock::render();
+    });
+
     // --- Visibility-transition repaints ------------------------------
     // Soft keyboard show/hide: resize the terminal grid (and the remote
     // pty via SSH WINCH) so cells stay above the panel; then invalidate
@@ -774,10 +808,56 @@ extern "C" void app_main(void) {
     });
 #endif
 
+    // Idle screen lock. Runtime state + NVS config; the ui hooks close
+    // every overlay when locking (the lock screen must be the only
+    // thing in the framebuffer while the backlight is off) and restore
+    // the terminal on unlock. Both hooks run with the UI lock held —
+    // lock_now()/tick() callers hold it.
+    tab5::screen_lock::init();
+    tab5::screen_lock::set_ui_hooks(
+        /*on_lock=*/[] {
+            if (tab5::menu.visible()) tab5::menu.close();
+            if (tab5::ap_qr_screen::visible()) tab5::ap_qr_screen::dismiss();
+            if (kbd.visible()) kbd.toggle();  // also restores 30 rows
+            ui::set_overlay_active(true);
+            ui::invalidate(ui::kFullScreen);  // lock layer paints (dark)
+        },
+        /*on_unlock=*/[] {
+            ui::set_overlay_active(tab5::menu.visible() ||
+                                   tab5::ap_qr_screen::visible());
+            ui::invalidate(ui::kFullScreen);  // terminal repaints
+        });
+    tab5::menu.set_lock_now([] { tab5::screen_lock::lock_now(); });
+    {
+        const esp_timer_create_args_t scrlock_args = {
+            .callback = &on_scrlock_tick,
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "scrlock_tick",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_handle_t scrlock_timer = nullptr;
+        ESP_ERROR_CHECK(esp_timer_create(&scrlock_args, &scrlock_timer));
+        ESP_ERROR_CHECK(
+            esp_timer_start_periodic(scrlock_timer, 30 * 1000 * 1000));
+    }
+
     // Initial paint of every layer in z order.
     { Lock lk; ui::invalidate(ui::kFullScreen); }
 
     tab5::start_touch_input([](const tab5::TouchPoint& p) {
+        tab5::screen_lock::activity_note();
+        // While locked the lock screen owns the touch surface entirely:
+        // the tap that wakes the backlight is consumed, later ones
+        // drive the PIN pad. Checked before everything else so nothing
+        // beneath (menu / keyboard / QR dismiss) sees input.
+        if (tab5::screen_lock::locked()) {
+            Lock lk;
+            if (!tab5::screen_lock::wake_if_dark()) {
+                (void)tab5::screen_lock::handle_touch(p);
+            }
+            return;
+        }
         // Boot-progress [Cancel] runs first so a tap on the status-panel
         // button during a long Wi-Fi / VPN / SSH connect is captured
         // before the menu / keyboard get a chance. handle_touch already

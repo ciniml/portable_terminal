@@ -9,6 +9,7 @@
 //   POST /api/wifi      — store STA credentials     (NVS via wifi_config)
 //   POST /api/profile   — store connection profile 0 (NVS via profiles)
 //   POST /api/tailscale — store Tailscale auth key / hostname (NVS "tailscale")
+//   POST /api/screenlock— screen-lock enable / timeout / PIN (applies live)
 //   POST /api/reboot    — deferred esp_restart()
 //
 // Write-endpoint contract (also mirrored by the settings page JS):
@@ -47,6 +48,7 @@
 
 #include "captive_portal.hpp"
 #include "profiles.hpp"
+#include "screen_lock.hpp"
 #include "wifi_config.hpp"
 #include "wifi_setup.hpp"
 
@@ -221,6 +223,14 @@ esp_err_t handle_api_info(httpd_req_t* req) {
             cJSON_AddStringToObject(pr, "user", p->user);
             cJSON_AddBoolToObject(pr, "password_set", p->password[0] != '\0');
         }
+    }
+
+    {
+        cJSON* sl = cJSON_AddObjectToObject(root, "screenlock");
+        auto cfg = tab5::screen_lock::get_config();
+        cJSON_AddBoolToObject(sl, "enabled", cfg.enabled);
+        cJSON_AddNumberToObject(sl, "timeout_min", cfg.timeout_min);
+        cJSON_AddBoolToObject(sl, "pin_set", tab5::screen_lock::pin_is_set());
     }
 
     {
@@ -520,6 +530,71 @@ esp_err_t handle_api_profile(httpd_req_t* req) {
     return send_json_ok(req, /*reboot_required=*/true);
 }
 
+// POST /api/screenlock
+//   {"enabled":bool,"timeout_min":int,"pin":"1234"}
+//
+// Contract: enabled (bool) and timeout_min (1..1440) are required; pin
+// is optional — empty or absent keeps the stored hash (the page leaves
+// the field blank with an "(unchanged)" placeholder). A non-empty pin
+// must be 4-8 ASCII digits and replaces the stored SHA-256 hash.
+// enabled:true is refused unless a PIN is already stored or provided
+// in the same request. Applies LIVE — no reboot needed; the settings
+// go straight into screen_lock (NVS + runtime atomics).
+esp_err_t handle_api_screenlock(httpd_req_t* req) {
+    esp_err_t err;
+    cJSON* root = read_json_body(req, &err);
+    if (!root) return err;
+
+    const cJSON* en_it  = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+    const cJSON* tm_it  = cJSON_GetObjectItemCaseSensitive(root, "timeout_min");
+    const char*  pin    = json_str_or(root, "pin", "");
+
+    if (!cJSON_IsBool(en_it)) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request", "enabled required");
+    }
+    const bool enabled = cJSON_IsTrue(en_it);
+    if (!cJSON_IsNumber(tm_it) ||
+        tm_it->valueint < 1 || tm_it->valueint > 1440) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request",
+                               "timeout_min must be 1-1440");
+    }
+    const uint16_t timeout_min = static_cast<uint16_t>(tm_it->valueint);
+
+    if (pin[0]) {
+        const size_t n = std::strlen(pin);
+        bool digits = n >= 4 && n <= 8;
+        for (size_t i = 0; digits && i < n; ++i) {
+            digits = pin[i] >= '0' && pin[i] <= '9';
+        }
+        if (!digits) {
+            cJSON_Delete(root);
+            return send_json_error(req, "400 Bad Request",
+                                   "pin must be 4-8 digits");
+        }
+    }
+    if (enabled && !pin[0] && !tab5::screen_lock::pin_is_set()) {
+        cJSON_Delete(root);
+        return send_json_error(req, "400 Bad Request",
+                               "enabling requires a PIN (none stored)");
+    }
+
+    if (pin[0] && !tab5::screen_lock::set_pin(pin)) {
+        cJSON_Delete(root);
+        return send_json_error(req, "500 Internal Server Error",
+                               "NVS write failed");
+    }
+    cJSON_Delete(root);
+    if (!tab5::screen_lock::set_config(enabled, timeout_min)) {
+        return send_json_error(req, "500 Internal Server Error",
+                               "NVS write failed");
+    }
+    ESP_LOGI(kTag, "screen lock config: enabled=%d timeout=%u (live)",
+             enabled ? 1 : 0, static_cast<unsigned>(timeout_min));
+    return send_json_ok(req, /*reboot_required=*/false);
+}
+
 // POST /api/reboot — reply {"ok":true} first, restart ~500 ms later on
 // an esp_timer so the HTTP response (and the TCP FIN) actually reach
 // the browser before the radio goes away.
@@ -592,7 +667,7 @@ esp_err_t start_httpd() {
     // 8 KB: the write handlers keep a 1 KB body buffer + a Profile on the
     // handler stack, plus cJSON parse depth.
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 16;  // 2 pages + 6 probes + 4 write APIs
+    cfg.max_uri_handlers = 16;  // 2 pages + 6 probes + 5 write APIs
     cfg.lru_purge_enable = true;
 
     esp_err_t err = httpd_start(&g_server, &cfg);
@@ -623,10 +698,11 @@ esp_err_t start_httpd() {
         const char* uri;
         esp_err_t (*handler)(httpd_req_t*);
     } kPostRoutes[] = {
-        {"/api/wifi",      &handle_api_wifi},
-        {"/api/tailscale", &handle_api_tailscale},
-        {"/api/profile",   &handle_api_profile},
-        {"/api/reboot",    &handle_api_reboot},
+        {"/api/wifi",       &handle_api_wifi},
+        {"/api/tailscale",  &handle_api_tailscale},
+        {"/api/profile",    &handle_api_profile},
+        {"/api/screenlock", &handle_api_screenlock},
+        {"/api/reboot",     &handle_api_reboot},
     };
     for (const auto& r : kPostRoutes) {
         const httpd_uri_t post_uri = {
