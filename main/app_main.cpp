@@ -754,6 +754,21 @@ extern "C" void app_main(void) {
     tab5::menu.bind_keyboard(&kbd);
     kbd.set_on_menu([] { tab5::menu.open(); });
 
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+    // Menu "AP QR" button: re-show the softAP onboarding overlay after
+    // provisioning. The menu has already hidden itself when this runs
+    // (and the touch task holds the UI lock), so this mirrors the
+    // boot-time show path: overlay up, full-screen repaint. Dismissal
+    // goes through dismiss_qr_screen_if_visible() as usual — any key
+    // or tap returns to the terminal.
+    tab5::menu.set_show_ap_qr([] {
+        if (!tab5::http_config::is_running()) return;
+        tab5::ap_qr_screen::show();
+        ui::set_overlay_active(true);
+        ui::invalidate(ui::kFullScreen);
+    });
+#endif
+
     // Initial paint of every layer in z order.
     { Lock lk; ui::invalidate(ui::kFullScreen); }
 

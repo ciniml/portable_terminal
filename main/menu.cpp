@@ -7,12 +7,16 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #include "M5Unified.h"
 
 #include "profiles.hpp"
 #include "soft_keyboard.hpp"
 #include "wifi_config.hpp"
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+#include "http_config.hpp"
+#endif
 
 namespace tab5 {
 
@@ -44,6 +48,9 @@ constexpr uint16_t kFieldBg       = 0x18C3;
 constexpr uint16_t kFieldBgFocus  = 0x3186;
 constexpr uint16_t kSaveBg        = 0x0410;
 constexpr uint16_t kSaveFg        = 0xFFFF;
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+constexpr uint16_t kDisabledFg    = 0x7BEF;   // mid-grey label
+#endif
 
 // Header layout
 constexpr int kHeaderH = 60;
@@ -63,18 +70,31 @@ constexpr int kDelX    = kRowX + kRowW - kDelW;  // right-aligned, 970
 constexpr int kEditW   = 130;
 constexpr int kEditX   = kDelX - 10 - kEditW;    // 830
 
-// Footer buttons on ProfileList: [Wi-Fi] | [Manage TOFU] | [+ Add new]
-// Three buttons, 200 px wide each, 30 px gaps, centred.
+// Footer buttons on ProfileList:
+//   [Wi-Fi] | [Manage TOFU] | [AP QR]* | [+ Add new]
+// 200 px wide each, 30 px gaps, centred. (*) The AP-QR button exists
+// only in CONFIG_TAB5_HTTP_CONFIG_ENABLED builds.
 constexpr int kAddW     = 200;
 constexpr int kAddH     = 60;
 constexpr int kFooterY  = kScreenH - kAddH - 20;
 constexpr int kAddY     = kFooterY;
 constexpr int kWifiBtnW = 200;
 constexpr int kTofuMgrW = 200;
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+constexpr int kQrBtnW   = 200;
+constexpr int kFooterTotal =
+    kWifiBtnW + 30 + kTofuMgrW + 30 + kQrBtnW + 30 + kAddW;
+#else
 constexpr int kFooterTotal = kWifiBtnW + 30 + kTofuMgrW + 30 + kAddW;
+#endif
 constexpr int kWifiBtnX = (kScreenW - kFooterTotal) / 2;
 constexpr int kTofuMgrX = kWifiBtnX + kWifiBtnW + 30;
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+constexpr int kQrBtnX   = kTofuMgrX + kTofuMgrW + 30;
+constexpr int kAddX     = kQrBtnX + kQrBtnW + 30;
+#else
 constexpr int kAddX     = kTofuMgrX + kTofuMgrW + 30;
+#endif
 
 // TofuList layout (re-uses some ProfileList constants for visual
 // consistency).
@@ -182,6 +202,13 @@ bool Menu::hit_manage_wifi(int x, int y) const {
     return x >= kWifiBtnX && x < kWifiBtnX + kWifiBtnW &&
            y >= kFooterY  && y < kFooterY  + kAddH;
 }
+
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+bool Menu::hit_ap_qr(int x, int y) const {
+    return x >= kQrBtnX && x < kQrBtnX + kQrBtnW &&
+           y >= kFooterY && y < kFooterY + kAddH;
+}
+#endif
 
 // Wi-Fi edit form layout. Three fields stacked above the kbd panel.
 namespace {
@@ -384,7 +411,7 @@ void Menu::render_profile_list() {
                      kScreenW / 2, kScreenH / 2);
     }
 
-    // Footer buttons: [Wi-Fi] | [Manage TOFU] | [+ Add new]
+    // Footer buttons: [Wi-Fi] | [Manage TOFU] | [AP QR]* | [+ Add new]
     bool press_add  = (pressed_idx_ == -3);
     bool press_tofu = (pressed_idx_ == -4);
     bool press_wifi = (pressed_idx_ == -5);
@@ -392,6 +419,19 @@ void Menu::render_profile_list() {
                 kEditBg, kEditFg, press_wifi);
     draw_button(kTofuMgrX, kFooterY, kTofuMgrW, kAddH, "Manage TOFU",
                 kEditBg, kEditFg, press_tofu);
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+    // Re-show the softAP onboarding QR overlay. Greyed out when the
+    // HTTP config service isn't running (Wi-Fi HW init failed etc.) —
+    // the QR would encode nothing useful.
+    if (http_config::is_running()) {
+        bool press_qr = (pressed_idx_ == -6);
+        draw_button(kQrBtnX, kFooterY, kQrBtnW, kAddH, "AP QR",
+                    kEditBg, kEditFg, press_qr);
+    } else {
+        draw_button(kQrBtnX, kFooterY, kQrBtnW, kAddH, "AP QR",
+                    kRowBg, kDisabledFg, /*pressed=*/false);
+    }
+#endif
     draw_button(kAddX, kAddY, kAddW, kAddH, "+ Add new",
                 kAddBg, kAddFg, press_add);
 }
@@ -682,6 +722,10 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             pressed_idx_ = -4;
         } else if (hit_manage_wifi(p.x, p.y)) {
             pressed_idx_ = -5;
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+        } else if (hit_ap_qr(p.x, p.y) && http_config::is_running()) {
+            pressed_idx_ = -6;
+#endif
         } else {
             int row = hit_row(p.y);
             if (row >= 0) {
@@ -709,6 +753,11 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
         } else if (pressed_idx_ == -5 && !hit_manage_wifi(p.x, p.y)) {
             pressed_idx_ = -1;
             render();
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+        } else if (pressed_idx_ == -6 && !hit_ap_qr(p.x, p.y)) {
+            pressed_idx_ = -1;
+            render();
+#endif
         } else if (pressed_idx_ >= 0) {
             int row = hit_row(p.y);
             int btn = hit_delete(p.x) ? 1
@@ -743,6 +792,20 @@ bool Menu::handle_touch_profile_list(const TouchPoint& p) {
             open_wifi();
             return true;
         }
+#if CONFIG_TAB5_HTTP_CONFIG_ENABLED
+        if (armed_idx == -6 && hit_ap_qr(p.x, p.y)) {
+            if (http_config::is_running() && show_ap_qr_) {
+                // Close the menu first (silently — the callback does
+                // one full-screen invalidate with the QR overlay up),
+                // so dismissing the overlay drops straight back to the
+                // terminal, same as the boot-time provisioning flow.
+                ESP_LOGI(kTag, "showing AP QR overlay");
+                state_ = State::Hidden;
+                show_ap_qr_();
+            }
+            return true;
+        }
+#endif
         if (armed_idx >= 0 && hit_row(p.y) == armed_idx) {
             if (armed_btn == 1 && hit_delete(p.x)) {
                 ESP_LOGI(kTag, "delete profile %d", armed_idx);

@@ -67,6 +67,14 @@ public:
     // re-marks the obscured region if closing, then calls render().
     void set_repaint(Repaint r) { repaint_ = std::move(r); }
 
+    // "AP QR" footer button (ProfileList, only when
+    // CONFIG_TAB5_HTTP_CONFIG_ENABLED): the menu closes itself, then
+    // invokes this callback so app_main can show the onboarding QR
+    // overlay + flip the ui_root overlay flags. Invoked with the UI
+    // lock held (same context as handle_touch / feed).
+    using ShowApQr = std::function<void()>;
+    void set_show_ap_qr(ShowApQr cb) { show_ap_qr_ = std::move(cb); }
+
     // The profile editor needs to redirect the keyboard's byte sink
     // into its own field buffers. app_main injects the SoftKeyboard
     // instance after constructing it.
@@ -89,6 +97,7 @@ private:
                                  // and of profiles.selected() (the auto-
                                  // connect flag).
     Repaint repaint_;
+    ShowApQr show_ap_qr_;
 
     // ---- ProfileEditor state ----
     struct Editor {
@@ -167,6 +176,8 @@ private:
     bool  hit_tofu_back(int x, int y) const;
     bool  hit_manage_tofu(int x, int y) const;   // on profile list
     bool  hit_manage_wifi(int x, int y) const;   // on profile list
+    bool  hit_ap_qr(int x, int y) const;         // on profile list
+                                                 // (HTTP config builds only)
 
     int   hit_wifi_field(int x, int y) const;
     bool  hit_wifi_save(int x, int y) const;
