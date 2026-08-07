@@ -18,17 +18,19 @@ CONFIG_ESP_TLS_USING_MBEDTLS=y
 CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=n
 CONFIG_ESP_HTTPS_OTA_ENABLE_PARTIAL_DOWNLOAD=y
 
-# Reusable VPN/USB components are present in components/ but unused in Phase 1.
-# Disable Tailscale to avoid pulling in TLS/lwIP tuning until Phase 3+.
-CONFIG_TAILSCALE_ENABLE=n
+# Tailscale on by default. The DISCO + multi-probe + pubip + outbound
+# CallMeMaybe work makes direct UDP land on hostile home networks with
+# DERP as the always-available fallback, so the reason this used to be
+# off (no direct-path negotiation, dead endpoints unreachable forever)
+# no longer applies. The auth key is empty by default — the client logs
+# an interactive login URL and the LCD shows it as a QR code, so a
+# freshly flashed device is provisioned without rebuilding.
+CONFIG_TAILSCALE_ENABLE=y
 
-# Route Tailscale peer traffic through the DERP relay rather than the
-# advertised direct UDP endpoint. The simplified data plane has no
-# DISCO-driven direct-path negotiation / fallback, so a fixed direct
-# endpoint that doesn't work (NAT, hairpin, expired mapping) leaves the
-# peer permanently unreachable. DERP reaches the peer by public key via
-# the relay mesh and works from any network. Slower but reliable.
-CONFIG_TAILSCALE_DERP_ONLY=y
+# Allow DISCO to promote peers to direct UDP. DERP still carries
+# traffic until a Pong verifies a direct path, and it takes over again
+# if that path goes stale.
+CONFIG_TAILSCALE_DERP_ONLY=n
 
 # C++ exceptions off (default), but enable RTTI for std::expected helpers
 # if needed by future code. Keep size optimization for OTA partitions.
@@ -46,10 +48,10 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # FTDI USB-Serial host driver (used by UsbSerialConnection).
 CONFIG_USB_HOST_ENABLE_FTDI_SIO_DRIVER=y
 
-# WireGuard VPN is opt-in — empty keys make wireguard_esp32_start fail
-# loud, so default off and let the user enable in sdkconfig.defaults.local
-# once they have a peer to connect to.
-CONFIG_WIREGUARD_ENABLE=n
+# WireGuard is pulled in implicitly by TAILSCALE_ENABLE (which selects
+# it), and Tailscale supplies the keys at runtime. Standalone WireGuard
+# with hand-configured keys stays opt-in: set TAILSCALE_ENABLE=n plus
+# WIREGUARD_ENABLE=y in sdkconfig.defaults.local for that.
 
 # Tailscale fans every tailnet peer into a separate WireGuard peer.
 # The WG default is 1 peer; raise to 16 so a typical tailnet fits

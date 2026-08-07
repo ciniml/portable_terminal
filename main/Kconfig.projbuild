@@ -170,7 +170,7 @@ menu "Tab5 terminal"
 
         config TAB5_SSH_ENABLED
             bool "Enable SSH client"
-            default n
+            default y
             depends on TAB5_WIFI_ENABLED
             help
                 When enabled and Wi-Fi has come up, the app opens an
