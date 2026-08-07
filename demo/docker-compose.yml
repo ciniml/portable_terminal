@@ -1,0 +1,48 @@
+# Demo SSH server reachable over Tailscale.
+#
+# Sidecar layout:
+#   ts   - official Tailscale image; owns a real tailscale0 interface and
+#          joins your tailnet as the node "tab5-demo-sshd" (its own 100.x IP).
+#   sshd - linuxserver OpenSSH; shares the ts container's network namespace
+#          (network_mode: service:ts), so it listens on that 100.x address.
+#
+# The Tab5 connects to  <ts 100.x>:2222  over the tailnet.
+#
+# Quick start:
+#   cp .env.example .env        # then paste your tskey-auth-... into .env
+#   docker compose up -d
+#   docker compose exec ts tailscale ip -4   # -> put this in the Tab5 config
+#
+# See README.md for the full walkthrough.
+
+services:
+  ts:
+    image: tailscale/tailscale:latest
+    hostname: tab5-demo-sshd          # name shown in the Tailscale admin console
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY in demo/.env}
+      - TS_HOSTNAME=tab5-demo-sshd
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ./ts-state:/var/lib/tailscale  # persist node identity across restarts
+    devices:
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+
+  sshd:
+    image: lscr.io/linuxserver/openssh-server:latest
+    network_mode: service:ts          # share ts's netns -> listen on the 100.x IP
+    environment:
+      - PASSWORD_ACCESS=true
+      - USER_NAME=${SSH_USER:-demo}
+      - USER_PASSWORD=${SSH_PASSWORD:-demo}
+      - PUID=1000
+      - PGID=1000
+      - TZ=Asia/Tokyo
+    volumes:
+      - ./sshd-config:/config          # persist host keys (keeps Tab5 TOFU stable)
+    restart: unless-stopped
+    depends_on:
+      - ts

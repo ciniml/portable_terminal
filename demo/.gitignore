@@ -1,0 +1,4 @@
+# Secrets and runtime state - never commit.
+.env
+ts-state/
+sshd-config/

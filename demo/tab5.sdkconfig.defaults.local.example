@@ -1,0 +1,28 @@
+# Tab5 firmware config for the Tailscale + SSH demo.
+#
+# Copy the relevant lines into  <repo root>/sdkconfig.defaults.local
+# (that path is already gitignored), then from the repo root:
+#
+#   source ~/esp-idf/6.0/export.sh
+#   rm -f sdkconfig && make build && make flash monitor
+#
+# Wi-Fi SSID/PSK are set via: idf.py menuconfig -> Tab5 terminal -> Wi-Fi
+
+# --- Wi-Fi (requires the ESP32-C6 slave firmware on the esp_hosted 2.x line) ---
+CONFIG_TAB5_WIFI_ENABLED=y
+
+# --- Tailscale: join the SAME tailnet as the demo container ---
+CONFIG_TAILSCALE_ENABLE=y
+CONFIG_TAILSCALE_AUTH_KEY="tskey-auth-xxxxxxxxxxxx"   # same key family as demo/.env
+CONFIG_TAILSCALE_HOSTNAME="tab5"
+CONFIG_TAILSCALE_CONTROL_SERVER="login.tailscale.com"
+CONFIG_TAILSCALE_LISTEN_PORT=41641
+CONFIG_TAILSCALE_DERP_ONLY=n        # try direct first, auto-fallback to DERP relay
+
+# --- SSH: target the demo container ---
+CONFIG_TAB5_SSH_ENABLED=y
+CONFIG_TAB5_SSH_HOST="100.a.b.c"    # <- output of: docker compose exec ts tailscale ip -4
+CONFIG_TAB5_SSH_PORT=2222           # linuxserver openssh-server default port
+CONFIG_TAB5_SSH_USER="demo"
+CONFIG_TAB5_SSH_PASSWORD="demo"
+CONFIG_TAB5_SSH_PUBKEY_AUTH=n
