@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 
 #include "term_core/east_asian_width.hpp"
 
@@ -589,6 +590,39 @@ void Screen::execute(uint8_t c0) {
     }
 }
 
+void Screen::respond(const char* s, size_t len) {
+    if (response_) {
+        response_(std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(s), len));
+    }
+}
+
+// DSR — Device Status Report (CSI Ps n / CSI ? Ps n).
+//   Ps=5 → operating status, always "OK" (CSI 0 n).
+//   Ps=6 → cursor position report, CSI r ; c R (1-based). The DEC private
+//          variant (DECXCPR, CSI ? 6 n) gets the ?-prefixed reply. uim-fep
+//          and other full-screen apps issue this at startup to find where
+//          the cursor is before taking over the screen.
+void Screen::device_status_report(std::span<const int> params,
+                                  bool private_marker) {
+    int ps = params.empty() ? 0 : params[0];
+    switch (ps) {
+        case 5:
+            respond("\x1b[0n", 4);
+            break;
+        case 6: {
+            char buf[24];
+            int n = std::snprintf(buf, sizeof(buf), "\x1b[%s%u;%uR",
+                                  private_marker ? "?" : "",
+                                  cursor_row_ + 1u, cursor_col_ + 1u);
+            if (n > 0) respond(buf, static_cast<size_t>(n));
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 void Screen::csi(char final_byte,
                  std::span<const int> params,
                  std::span<const uint8_t> intermediates,
@@ -701,6 +735,9 @@ void Screen::csi(char final_byte,
             }
             break;
         }
+        case 'n':
+            device_status_report(params, private_marker);
+            break;
         case 's':
             saved_row_ = cursor_row_;
             saved_col_ = cursor_col_;

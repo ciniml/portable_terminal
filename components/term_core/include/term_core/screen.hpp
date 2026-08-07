@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -10,6 +11,11 @@
 #include "term_core/parser.hpp"
 
 namespace term {
+
+// Terminal → host back-channel for query responses (DSR etc.). Wired to the
+// active connection's send() on hardware; unset (responses dropped) is fine
+// for local-echo use.
+using ResponseSink = std::function<void(std::span<const uint8_t>)>;
 
 class Screen : public IParserSink {
 public:
@@ -50,6 +56,10 @@ public:
     }
 
     void reset();
+
+    // Install the terminal → host response channel. May be called from the
+    // parser sink's own task; the callback runs inside csi() dispatch.
+    void set_response_sink(ResponseSink sink) { response_ = std::move(sink); }
 
     // Change the grid dimensions. Cells in the surviving rectangle keep
     // their contents; new cells are initialised to the default Cell. The
@@ -98,6 +108,9 @@ private:
 
     void set_dec_modes(std::span<const int> params, bool set);
 
+    void device_status_report(std::span<const int> params, bool private_marker);
+    void respond(const char* s, size_t len);
+
     void enter_alt_screen();
     void exit_alt_screen();
 
@@ -141,6 +154,7 @@ private:
 
     DamageRect damage_{};
     bool bell_pending_{false};
+    ResponseSink response_{};
 
     // Alt-screen support (DECSET ?1049 / ?1047 / ?47). Holds whichever
     // screen is currently inactive — swapped wholesale on transition.
