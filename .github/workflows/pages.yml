@@ -8,6 +8,14 @@ on:
     paths:
       - 'docs/**'
       - '.github/workflows/pages.yml'
+  # `release: published` does NOT fire when the release is created by
+  # release.yml, because GitHub suppresses events triggered via
+  # GITHUB_TOKEN to prevent recursive workflow runs. Chain off the
+  # release workflow's completion instead; the release trigger stays
+  # for releases published by hand through the web UI.
+  workflow_run:
+    workflows: ["Build and Release Firmware"]
+    types: [completed]
   release:
     types: [published]
   workflow_dispatch:
