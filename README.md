@@ -32,7 +32,7 @@ A Japanese version of this README is at [README.ja.md](README.ja.md).
   - Optional clip-on **Tab5 Keyboard** (I2C HID, software typematic / auto-repeat)
 - **Status panel** — battery, charging, Wi-Fi IP, SSH state, uptime
 - **Buzzer** (BEL via M5.Speaker)
-- **Host-side unit tests** for the hardware-independent VT100 core (52 tests via
+- **Host-side unit tests** for the hardware-independent VT100 core (59 tests via
   GoogleTest)
 
 ## Hardware
@@ -192,7 +192,7 @@ make test-host
 make clean-host
 ```
 
-Expected: 52 / 52 tests pass.
+Expected: 59 / 59 tests pass.
 
 ## HTTP settings service (softAP + QR onboarding)
 

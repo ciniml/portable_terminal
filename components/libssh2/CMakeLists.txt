@@ -22,12 +22,20 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
     HAVE_CONFIG_H=1
 )
 
-# Explicit mbedTLS include paths. `REQUIRES mbedtls` propagation is not
-# stable across IDF 6.0 snapshots — 6.0.2's TF-PSA-Crypto restructure
-# moved legacy headers (mbedtls/rsa.h etc.) relative to the beta layout,
-# and the release CI container failed to find them through the component
-# interface alone. Listing every plausible location is harmless where a
-# path doesn't exist. Same pattern as components/tailscale/CMakeLists.txt.
+# Explicit mbedTLS include paths, for robustness against `REQUIRES mbedtls`
+# propagation differences between IDF 6.0 snapshots. Listing every plausible
+# location is harmless where a path doesn't exist. Same pattern as
+# components/tailscale/CMakeLists.txt.
+#
+# NOTE: this does NOT make libssh2 build on IDF 6.0.x stable. Those releases
+# ship mbedTLS 4 / TF-PSA-Crypto, which made the low-level crypto headers
+# libssh2's backend includes directly — rsa.h, bignum.h, cipher.h, ecdh.h,
+# ecdsa.h, entropy.h, ctr_drbg.h — *private* (they now live under
+# tf-psa-crypto/drivers/builtin/include/mbedtls/private/). Verified against a
+# v6.0.2 checkout: only mbedtls/private/rsa.h exists, and the build fails at
+# src/mbedtls.h:62. Moving to stable needs libssh2 to gain PSA support
+# upstream; until then CI pins the pre-mbedTLS-4 master snapshot that the
+# project is developed against. See .github/workflows/release.yml.
 idf_component_get_property(mbedtls_dir mbedtls COMPONENT_DIR)
 target_include_directories(${COMPONENT_LIB} PRIVATE
     ${mbedtls_dir}/mbedtls/include
