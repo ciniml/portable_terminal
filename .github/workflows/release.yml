@@ -25,7 +25,15 @@ jobs:
       # The project requires ESP-IDF >= 6.0 (idf_component.yml). Pin to the
       # tagged release line so behaviour is stable; bump explicitly when
       # upgrading.
-      image: espressif/idf:release-v6.0
+      # Pinned to v6.0-beta1, NOT release-v6.0 (currently v6.0.2).
+      # mbedTLS made mbedtls/rsa.h private after beta1 (it now lives at
+      # tf-psa-crypto/drivers/builtin/include/mbedtls/private/rsa.h), and
+      # libssh2 1.11.1 includes it directly from src/mbedtls.h — the
+      # stable containers therefore can't build our SSH stack without
+      # patching libssh2 itself. beta1 also matches the local dev
+      # toolchain, so CI and desktop builds stay byte-comparable.
+      # Revisit when libssh2 gains mbedTLS-4/TF-PSA-Crypto support.
+      image: espressif/idf:v6.0-beta1
 
     steps:
       - name: Checkout repository
