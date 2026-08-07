@@ -1,4 +1,4 @@
-# tab5_claude_client
+# portable_terminal
 
 Terminal emulator for **M5Stack Tab5** (ESP32-P4, 1280×720 MIPI-DSI LCD). Supports
 SSH and Telnet over Wi-Fi, with WireGuard / Tailscale VPN for reaching hosts
@@ -74,7 +74,7 @@ needed yet you can still flash the main app and use UART input.
 Released artifacts are also downloadable from
 [GitHub Releases](https://github.com/ciniml/portable_terminal/releases) — each
 release ZIP contains a single packed `firmware-vX.Y.Z.bin` plus the individual
-`bootloader.bin` / `partition-table.bin` / `ota_data_initial.bin` / `tab5_claude_client.bin`
+`bootloader.bin` / `partition-table.bin` / `ota_data_initial.bin` / `portable_terminal.bin`
 for use with esptool.
 
 ## Prerequisites (for building from source)

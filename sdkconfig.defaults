@@ -1,4 +1,4 @@
-# Common defaults for tab5_claude_client (target-independent).
+# Common defaults for portable_terminal (target-independent).
 # Per-target overrides live in sdkconfig.defaults.<target>.
 
 # OTA-friendly partition layout (see partitions.csv)

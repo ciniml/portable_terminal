@@ -1,6 +1,6 @@
 # Tailscale 改良の serial_wifi_logger への back-port 用ノート
 
-Tab5 (tab5_claude_client) で実装した Tailscale クライアント拡張を、上流の
+Tab5 (portable_terminal) で実装した Tailscale クライアント拡張を、上流の
 `ciniml/serial_wifi_logger` に取り込む際に必要な知識をまとめたもの。
 時系列に積み上げた 4 phase をひと続きの設計として整理し直してある。
 

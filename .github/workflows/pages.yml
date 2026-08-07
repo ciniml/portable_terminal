@@ -76,25 +76,44 @@ jobs:
             echo "{\"tag\":\"$tag\",\"zip\":\"$asset\"}" >> /tmp/per_tag.ndjson
 
             # OTA staging: prefer the raw asset (release.yml >= v0.3 uploads
-            # tab5_claude_client.bin + latest.json), and fall back to unzipping
-            # the firmware ZIP for older tags.
+            # <app>.bin + latest.json), and fall back to unzipping the
+            # firmware ZIP for older tags.
+            #
+            # The IDF project was renamed tab5_claude_client ->
+            # portable_terminal, so the app binary is named
+            # portable_terminal.bin from that rename onward and
+            # tab5_claude_client.bin for tags published before it (v0.1.0).
+            # This loop runs over ALL past releases, so both names must be
+            # handled: try the new name first, then the legacy one.
             if gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
-                 -p "tab5_claude_client.bin" -p "latest.json" \
+                 -p "portable_terminal.bin" -p "tab5_claude_client.bin" \
+                 -p "latest.json" \
                  -D "$dest" --clobber 2>/dev/null; then
               echo "[ok] $tag: staged raw app + latest.json"
             else
               echo "[info] $tag: no raw OTA assets — unzipping ZIP"
-              (cd "$dest" && unzip -o "$asset" tab5_claude_client.bin >/dev/null 2>&1 || true)
-              # Older tags have no latest.json in the release; synthesize one
-              # so the file exists at the tag URL for pinning.
-              if [ ! -f "$dest/latest.json" ] && [ -f "$dest/tab5_claude_client.bin" ]; then
-                SHA=$(sha256sum "$dest/tab5_claude_client.bin" | cut -d' ' -f1)
-                SIZE=$(stat -c%s "$dest/tab5_claude_client.bin")
-                PAGES_BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY##*/}"
-                cat > "$dest/latest.json" <<EOF
-          {"tag":"$tag","url":"$PAGES_BASE/firmware/$tag/tab5_claude_client.bin","sha256":"$SHA","size":$SIZE,"project_name":"tab5_claude_client","chip_id":"esp32p4"}
+              (cd "$dest" && unzip -o "$asset" portable_terminal.bin >/dev/null 2>&1 \
+                 || unzip -o "$asset" tab5_claude_client.bin >/dev/null 2>&1 || true)
+            fi
+
+            # Resolve whichever app-binary name landed in $dest.
+            app_bin=""
+            for cand in portable_terminal.bin tab5_claude_client.bin; do
+              if [ -f "$dest/$cand" ]; then app_bin="$cand"; break; fi
+            done
+
+            # Older tags have no latest.json in the release; synthesize one
+            # so the file exists at the tag URL for pinning.
+            if [ ! -f "$dest/latest.json" ] && [ -n "$app_bin" ]; then
+              SHA=$(sha256sum "$dest/$app_bin" | cut -d' ' -f1)
+              SIZE=$(stat -c%s "$dest/$app_bin")
+              # project_name mirrors the binary name so a synthesized
+              # manifest for a legacy tag stays self-consistent.
+              PROJECT_NAME="${app_bin%.bin}"
+              PAGES_BASE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY##*/}"
+              cat > "$dest/latest.json" <<EOF
+          {"tag":"$tag","url":"$PAGES_BASE/firmware/$tag/$app_bin","sha256":"$SHA","size":$SIZE,"project_name":"$PROJECT_NAME","chip_id":"esp32p4"}
           EOF
-              fi
             fi
 
             # First non-prerelease tag wins for _site/latest.json.

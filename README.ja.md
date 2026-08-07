@@ -1,4 +1,4 @@
-# tab5_claude_client
+# portable_terminal
 
 **M5Stack Tab5** (ESP32-P4, 1280×720 MIPI-DSI LCD) 向けターミナルエミュレータ。
 Wi-Fi 経由で SSH / Telnet 接続、さらに WireGuard / Tailscale VPN で NAT 越しの
@@ -71,7 +71,7 @@ WebSerial 対応ブラウザが必要です。C6 ファームが対応バージ�
 リリース成果物は [GitHub Releases](https://github.com/ciniml/portable_terminal/releases)
 からもダウンロードできます。各リリース ZIP には単一ファイル形式の
 `firmware-vX.Y.Z.bin` と、esptool 用に分割した `bootloader.bin` /
-`partition-table.bin` / `ota_data_initial.bin` / `tab5_claude_client.bin`
+`partition-table.bin` / `ota_data_initial.bin` / `portable_terminal.bin`
 が同梱されています。
 
 ## 必要環境 (ソースからビルドする場合)

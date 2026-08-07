@@ -1,6 +1,6 @@
 # OTA (Over-the-Air) 更新設計ノート
 
-`tab5_claude_client` (M5Stack Tab5 / ESP32-P4, ESP-IDF 6.0) の
+`portable_terminal` (M5Stack Tab5 / ESP32-P4, ESP-IDF 6.0) の
 ネットワーク経由ファームウェア更新機構の設計案。
 実装コードは含まない — 方針を固めるためのドキュメント。
 
@@ -17,7 +17,7 @@
 - `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` (rollback は有効)
 - CI (`.github/workflows/release.yml`) が tag push で
   `firmware-<tag>.zip` を GH Release に添付。ZIP 内には
-  `tab5_claude_client.bin` (アプリ本体, `0x10000`) と単一ファイル
+  `portable_terminal.bin` (アプリ本体, `0x10000`) と単一ファイル
   `firmware-<tag>.bin` (`0x0`) が含まれる。
 - Pages ワークフロー (`.github/workflows/pages.yml`) は
   `_site/firmware/<tag>/firmware-<tag>.zip` を配置し、
@@ -38,7 +38,7 @@ Tab5 で現実的な 5 系統 + 参考 1 系統を並べる。
 
 ### 1.1 HTTPS pull from GitHub Releases (直接)
 
-`https://github.com/<owner>/<repo>/releases/download/<tag>/tab5_claude_client.bin`
+`https://github.com/<owner>/<repo>/releases/download/<tag>/portable_terminal.bin`
 を `esp_https_ota` で pull する。
 
 - フィット: **極めて良い**。Wi-Fi が立ち上がった時点で GitHub は
@@ -83,7 +83,7 @@ Tab5 で現実的な 5 系統 + 参考 1 系統を並べる。
 1.1 と等価な pull が可能:
 
 ```
-_site/firmware/<tag>/tab5_claude_client.bin  (アプリのみ、OTA 用)
+_site/firmware/<tag>/portable_terminal.bin  (アプリのみ、OTA 用)
 _site/firmware/<tag>/firmware-<tag>.zip       (フル一式、Web Flasher 用)
 _site/latest.json                             (最新 tag / URL / sha256)
 ```
@@ -236,9 +236,16 @@ Tab5 が softAP を立て、内蔵 HTTP サーバに phone / laptop から
 - **cert 検証**: `esp_crt_bundle_attach`。GH Pages は `github.io`
   ワイルドカード + Fastly の証明書。IDF 同梱束で足りる。
 - **image 検証**: `esp_https_ota` は download 中に
-  `esp_app_desc` を先頭 chunk からパースして chip_id (P4) と
-  `project_name` == "tab5_claude_client" を照合する
-  (`CONFIG_ESP_HTTPS_OTA_DECRYPT_CB` オフ, 標準経路)。
+  `esp_app_desc` を先頭 chunk からパースして chip_id (P4) を
+  照合する (`esp_ota_verify_chip_id`)。
+  **`project_name` は照合しない** — IDF 側 (`esp_https_ota` /
+  `app_update`) に project_name を検査するコードは存在せず、
+  `esp_https_ota_get_img_desc()` で取得してログに出すだけ。
+  そのため IDF プロジェクト名を `tab5_claude_client` から
+  `portable_terminal` に改名しても、旧名でビルドされた
+  v0.1.0 実機の OTA 更新は壊れない。
+  anti-rollback を有効化した場合は別途 `secure_version` が
+  比較される (名前ではない)。
 - **署名**: 現状は「TLS + repo 所有者信頼」で運用可能だが、
   漏洩耐性を上げたい場合は
   `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y` + ECDSA 鍵で
@@ -352,19 +359,19 @@ Modal menu 側 (`main/menu.cpp`) にも "Firmware" タブを追加して:
 
 `release.yml` (**別 PR で** — 本設計は「変更が要る」を書くだけ):
 
-1. Stage 時に `_site/firmware/<tag>/tab5_claude_client.bin` として
+1. Stage 時に `_site/firmware/<tag>/portable_terminal.bin` として
    アプリバイナリを平置きコピー。
    - 具体的には `release` step で
-     `cp build/tab5_claude_client.bin` を追加。
+     `cp build/portable_terminal.bin` を追加。
 2. `latest.json` の生成:
 
    ```json
    {
      "tag": "v0.3.0",
-     "bin_url": "https://<owner>.github.io/<repo>/firmware/v0.3.0/tab5_claude_client.bin",
+     "bin_url": "https://<owner>.github.io/<repo>/firmware/v0.3.0/portable_terminal.bin",
      "sha256": "…",
      "size": 2412544,
-     "project_name": "tab5_claude_client",
+     "project_name": "portable_terminal",
      "chip_id": "esp32p4",
      "min_prev_tag": "v0.2.0"
    }
@@ -534,7 +541,7 @@ Modal menu 側 (`main/menu.cpp`) にも "Firmware" タブを追加して:
   タブは変更していない。手動 `kick(Manual)` / rollback / channel select
   等の UI は BLE 設定サービス側に寄せるか、menu の後続 PR で入れる。
 - **CI (§3.3)**:
-  - `release.yml` は `release/tab5_claude_client.bin` + `release/latest.json`
+  - `release.yml` は `release/portable_terminal.bin` + `release/latest.json`
     をリリースアセットとして直接添付する形にした (ZIP は既存 Web Flasher
     互換のためそのまま残す)。
   - `pages.yml` は各 tag の raw アプリバイナリと `latest.json` を

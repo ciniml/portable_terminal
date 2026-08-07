@@ -278,11 +278,17 @@ menu "Tab5 terminal"
         config TAB5_OTA_LATEST_URL
             string "Base URL for latest.json polling"
             depends on TAB5_OTA_ENABLED
-            default "https://ciniml.github.io/tab5_claude_client/"
+            default "https://ciniml.github.io/portable_terminal/"
             help
                 URL of the directory that hosts latest.json. The client
                 appends "latest.json" itself. Overridable at runtime via
                 NVS "ota.base_url".
+
+                Note: this github.io URL 301-redirects to
+                https://www.fugafuga.org/portable_terminal/ because a
+                custom domain is configured on the account. That is
+                expected — esp_https_ota follows redirects, so the
+                canonical github.io form is kept here.
 
         config TAB5_OTA_POLL_INTERVAL_H
             int "Poll interval (hours)"

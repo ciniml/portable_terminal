@@ -116,12 +116,12 @@ size-files:
 # Print ELF section headers — useful to inspect where .bss / .data /
 # .dram0 actually live in the address map.
 sections:
-	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-objdump -h build/tab5_claude_client.elf"
+	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-objdump -h build/portable_terminal.elf"
 
 # List the largest .bss symbols by size — useful when chasing down
 # which component is bloating internal SRAM.
 bss-top:
-	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-nm --size-sort --print-size build/tab5_claude_client.elf 2>/dev/null | grep ' [bB] ' | tail -30"
+	bash -c "source $(IDF_EXPORTS) && riscv32-esp-elf-nm --size-sort --print-size build/portable_terminal.elf 2>/dev/null | grep ' [bB] ' | tail -30"
 
 clean:
 	bash -c "source $(IDF_EXPORTS) && idf.py fullclean"

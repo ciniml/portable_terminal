@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>tab5_claude_client Web Flasher</title>
+<title>portable_terminal Web Flasher</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
@@ -33,7 +33,7 @@
 </style>
 </head>
 <body>
-<h1>📟 tab5_claude_client Web Flasher</h1>
+<h1>📟 portable_terminal Web Flasher</h1>
 <p class="sub">
   ブラウザから M5Stack Tab5 (ESP32-P4) にターミナルファームウェアを書き込みます。
   <br>Chrome / Edge など <a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Serial_API#browser_compatibility" target="_blank" rel="noopener">WebSerial 対応ブラウザ</a> が必要です。
@@ -122,19 +122,24 @@
 <script type="module">
 import { ESPLoader, Transport } from './esptool.js';
 
-// Initial-flash layout for tab5_claude_client partition table (see partitions.csv).
+// Initial-flash layout for portable_terminal partition table (see partitions.csv).
 //   bootloader            @ 0x2000  — ESP32-P4 ROM bootloader looks here, not 0x0
 //   partition-table       @ 0x8000
 //   ota_data_initial      @ 0xd000  — empty/all-FF, makes ota_0 the active slot
-//   tab5_claude_client    @ 0x10000 — the running app in ota_0
+//   portable_terminal     @ 0x10000 — the running app in ota_0
 // ota_1 is left blank; an OTA update from the running app (when one is wired
 // up in a future phase) fills it. All four .bin files ship inside the
 // release ZIP — no `local` fallback needed.
+//
+// `altNames` covers the IDF project rename (tab5_claude_client ->
+// portable_terminal): release ZIPs cut before the rename (v0.1.0) carry the
+// old app-binary name, so the app entry accepts either.
 const FLASH_PARTS = [
   { name: 'bootloader.bin',          address: 0x2000  },
   { name: 'partition-table.bin',     address: 0x8000  },
   { name: 'ota_data_initial.bin',    address: 0xd000  },
-  { name: 'tab5_claude_client.bin',  address: 0x10000 },
+  { name: 'portable_terminal.bin',   address: 0x10000,
+    altNames: ['tab5_claude_client.bin'] },
 ];
 
 const $ = (id) => document.getElementById(id);
@@ -350,9 +355,14 @@ $('btnFlash').addEventListener('click', async () => {
 
   const fileArray = [];
   for (const part of FLASH_PARTS) {
-    const buf = entries.get(part.name);
+    const candidates = [part.name, ...(part.altNames || [])];
+    const found = candidates.find((n) => entries.has(n));
+    const buf = found ? entries.get(found) : undefined;
+    if (found && found !== part.name) {
+      log(`Using ${found} (legacy name) for ${part.name}`);
+    }
     if (!buf) {
-      log(`Failed to load ${part.name}: not found in ZIP`, 'warn');
+      log(`Failed to load ${candidates.join(' / ')}: not found in ZIP`, 'warn');
       $('btnFlash').disabled = false;
       $('btnDisconnect').disabled = false;
       return;

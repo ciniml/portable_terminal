@@ -1,4 +1,4 @@
-# tab5_claude_client
+# portable_terminal
 
 M5Stack Tab5 (ESP32-P4) terminal emulator. Long-term goal: multi-connection
 client (UART / USB-serial / Telnet / SSH) over WireGuard / Tailscale VPN.

@@ -161,13 +161,13 @@ jobs:
           cp build/bootloader/bootloader.bin           "$outdir/"
           cp build/partition_table/partition-table.bin "$outdir/"
           cp build/ota_data_initial.bin                "$outdir/"
-          cp build/tab5_claude_client.bin              "$outdir/"
+          cp build/portable_terminal.bin              "$outdir/"
           cp build/flash_args                          "$outdir/"
           cp "firmware-${VERSION}.bin"                 "$outdir/"
           cp README.md                                 "$outdir/" 2>/dev/null || true
           cp LICENSE                                   "$outdir/" 2>/dev/null || true
           echo "=== Firmware size ==="
-          python3 -m esp_idf_size build/tab5_claude_client.map --format=text || true
+          python3 -m esp_idf_size build/portable_terminal.map --format=text || true
           (cd "$outdir" && zip -r "../firmware-${VERSION}.zip" .)
           ls -lh "firmware-${VERSION}.zip"
 
@@ -182,15 +182,15 @@ jobs:
           PAGES_BASE: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
         run: |
           set -euo pipefail
-          SHA=$(sha256sum "release/tab5_claude_client.bin" | cut -d' ' -f1)
-          SIZE=$(stat -c%s "release/tab5_claude_client.bin")
+          SHA=$(sha256sum "release/portable_terminal.bin" | cut -d' ' -f1)
+          SIZE=$(stat -c%s "release/portable_terminal.bin")
           cat > release/latest.json <<EOF
           {
             "tag": "${VERSION}",
-            "url": "${PAGES_BASE}/firmware/${VERSION}/tab5_claude_client.bin",
+            "url": "${PAGES_BASE}/firmware/${VERSION}/portable_terminal.bin",
             "sha256": "${SHA}",
             "size": ${SIZE},
-            "project_name": "tab5_claude_client",
+            "project_name": "portable_terminal",
             "chip_id": "esp32p4"
           }
           EOF
@@ -208,7 +208,7 @@ jobs:
         with:
           name: app-${{ steps.version.outputs.version }}
           path: |
-            release/tab5_claude_client.bin
+            release/portable_terminal.bin
             release/latest.json
           retention-days: 90
 
@@ -245,10 +245,10 @@ jobs:
         with:
           files: |
             firmware-${{ steps.version.outputs.version }}.zip
-            app_raw/tab5_claude_client.bin
+            app_raw/portable_terminal.bin
             app_raw/latest.json
           body: |
-            # tab5_claude_client ${{ steps.version.outputs.version }}
+            # portable_terminal ${{ steps.version.outputs.version }}
 
             M5Stack Tab5 (ESP32-P4) ターミナルエミュレータのファームウェアリリース。
 
@@ -260,7 +260,7 @@ jobs:
             | `bootloader.bin` | ブートローダ (`0x2000`) |
             | `partition-table.bin` | パーティションテーブル (`0x8000`) |
             | `ota_data_initial.bin` | OTA データ初期値 (`0xd000`) |
-            | `tab5_claude_client.bin` | アプリ本体 (`0x10000`) |
+            | `portable_terminal.bin` | アプリ本体 (`0x10000`) |
             | `flash_args` | `esptool` 向けのアドレス + ファイル指定 |
 
             ## インストール
@@ -292,7 +292,7 @@ jobs:
               0x2000  bootloader.bin \
               0x8000  partition-table.bin \
               0xd000  ota_data_initial.bin \
-              0x10000 tab5_claude_client.bin
+              0x10000 portable_terminal.bin
             ```
 
             ## 設定
