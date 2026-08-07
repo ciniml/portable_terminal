@@ -21,19 +21,22 @@ jobs:
   build:
     name: Build firmware (esp32p4)
     runs-on: ubuntu-latest
-    container:
-      # The project requires ESP-IDF >= 6.0 (idf_component.yml). Pin to the
-      # tagged release line so behaviour is stable; bump explicitly when
-      # upgrading.
-      # Pinned to v6.0-beta1, NOT release-v6.0 (currently v6.0.2).
-      # mbedTLS made mbedtls/rsa.h private after beta1 (it now lives at
-      # tf-psa-crypto/drivers/builtin/include/mbedtls/private/rsa.h), and
-      # libssh2 1.11.1 includes it directly from src/mbedtls.h — the
-      # stable containers therefore can't build our SSH stack without
-      # patching libssh2 itself. beta1 also matches the local dev
-      # toolchain, so CI and desktop builds stay byte-comparable.
-      # Revisit when libssh2 gains mbedTLS-4/TF-PSA-Crypto support.
-      image: espressif/idf:v6.0-beta1
+    # No `container:` — ESP-IDF is checked out at a pinned commit below.
+    # Neither published image works for this project:
+    #
+    #   * release-v6.0 (v6.0.2) ships mbedTLS 4 / TF-PSA-Crypto, which
+    #     made the low-level crypto headers private (mbedtls/rsa.h,
+    #     bignum.h, cipher.h, ecdh.h, ecdsa.h, entropy.h, ctr_drbg.h).
+    #     libssh2 1.11.1's mbedTLS backend includes them directly, so
+    #     the SSH stack cannot build until libssh2 gains PSA support.
+    #   * The v6.0-beta1 tag predates a rom_gpio_matrix_out rename that
+    #     M5GFX's Bus_SPI.cpp depends on.
+    #
+    # IDF_PIN below is the master snapshot the project is developed
+    # against, where both build. Bump it (and the local checkout) in
+    # lockstep.
+    env:
+      IDF_PIN: 6534932340b7140dfec19a9f24248fa9568c61d0
 
     steps:
       - name: Checkout repository
@@ -45,13 +48,35 @@ jobs:
       - name: Verify git version information
         shell: bash
         run: |
-          # Container's git refuses operations in a workspace it doesn't own;
-          # mark it safe before any git command.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "=== Git Information ==="
           git describe --tags --abbrev=0 || echo "(no tags found)"
           git rev-parse --short HEAD
           echo "Current ref: ${GITHUB_REF}"
+
+      - name: Cache ESP-IDF + tools
+        id: idf-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/esp-idf
+            ~/.espressif
+          key: idf-${{ env.IDF_PIN }}-esp32p4
+
+      - name: Install ESP-IDF at the pinned commit
+        if: steps.idf-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget flex bison gperf python3 python3-pip python3-venv \
+            cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+          git clone https://github.com/espressif/esp-idf.git ~/esp-idf
+          cd ~/esp-idf
+          git checkout "$IDF_PIN"
+          git submodule update --init --recursive --depth 1
+          ./install.sh esp32p4
 
       - name: ccache (compiler cache)
         # restore-keys lets a fresh tag pick up the most recent main-branch
@@ -103,7 +128,7 @@ jobs:
           IDF_CCACHE_ENABLE: "1"
         run: |
           set -euo pipefail
-          . $IDF_PATH/export.sh
+          . "$HOME/esp-idf/export.sh"
           echo "=== ccache config ==="
           ccache --version | head -1
           ccache --show-config | grep -E "max_size|cache_dir|compiler_check" || true
