@@ -63,13 +63,19 @@ menu "Tab5 terminal"
 
     config TAB5_KEYBOARD_INPUT_ENABLED
         bool "Enable Tab5 Keyboard (ExtPort1, I2C)"
-        default n
+        default y
         help
             M5Stack Tab5 clip-on keyboard wired to ExtPort1 (I2C addr
             0x6D, INT=GPIO50). Bytes flow through the same path as the
-            other input sources. Pulls in M5UnitUnified + M5Unit-KEYBOARD
-            — see main/idf_component.yml. Set to =y here OR in
-            sdkconfig.defaults.local once you have the keyboard plugged in.
+            other input sources.
+
+            Safe to leave on when no keyboard is attached: the driver
+            bails out at the FIRMWARE_VER handshake, releases the I2C
+            bus, and the rest of the input stack (touch / soft keyboard
+            / USB-HID / UART) is unaffected.
+
+            Driven by a standalone driver over esp_driver_i2c + a GPIO
+            ISR — no M5UnitUnified / M5Unit-KEYBOARD dependency.
 
     config TAB5_KEYBOARD_I2C_SDA
         int "Tab5 Keyboard SDA GPIO"
